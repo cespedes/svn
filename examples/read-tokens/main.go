@@ -13,4 +13,7 @@ func main() {
 	for t.Scan() {
 		fmt.Printf("Token: %s\n", t.Token())
 	}
+	if err := t.Err(); err != nil {
+		fmt.Printf("Error: %s\n", err)
+	}
 }
