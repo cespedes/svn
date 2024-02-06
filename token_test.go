@@ -27,6 +27,64 @@ var tokenTests = []tokenTest{
 		"42 ",
 		"42",
 	},
+	// A word
+	{
+		"word",
+		"sesame ",
+		"sesame",
+	},
+	// Alphanumeric word
+	{
+		"alphanumeric word",
+		"plan42 ",
+		"plan42",
+	},
+	// String
+	{
+		"string",
+		"8:elephant ",
+		"8:elephant",
+	},
+	// svnserve
+	{
+		"svnserve",
+		"( success ( 2 2 ( ) ( edit-pipeline svndiff1 accepts-svndiff2 absent-entries commit-revprops depth log-revprops atomic-revprops partial-replay inherited-props ephemeral-txnprops file-revs-reverse list ) ) )  ",
+		"($success$($2$2$($)$($edit-pipeline$svndiff1$accepts-svndiff2$absent-entries$commit-revprops$depth$log-revprops$atomic-revprops$partial-replay$inherited-props$ephemeral-txnprops$file-revs-reverse$list$)$)$)",
+	},
+}
+
+type tokenErrorTest struct {
+	// A short description of the test case.
+	desc string
+	// The input to parse.
+	input string
+}
+
+var tokenErrorTests = []tokenErrorTest{
+	{
+		"no space after",
+		"42",
+	},
+	{
+		"negative number",
+		"-42 ",
+	},
+	{
+		"number and letters",
+		"42foo ",
+	},
+	{
+		"letters and symbols",
+		"foo/ ",
+	},
+	{
+		"short string",
+		"4:foo",
+	},
+	{
+		"long string",
+		"2:foo ",
+	},
 }
 
 func TestTokenizer(t *testing.T) {
@@ -47,8 +105,23 @@ func TestTokenizer(t *testing.T) {
 				}
 			}
 			z.Scan()
-			if z.Err() != io.EOF {
-				t.Errorf("%s: want EOF got %q", tt.desc, z.Err())
+			switch z.Err() {
+			case nil:
+				t.Errorf("%s: want EOF got %q", tt.desc, z.Token().String())
+			case io.EOF:
+			default:
+				t.Errorf("%s: want EOF got error %v", tt.desc, z.Err())
+			}
+		})
+	}
+	for _, tt := range tokenErrorTests {
+		t.Run(tt.desc, func(t *testing.T) {
+			z := NewTokenizer(strings.NewReader(tt.input))
+			for z.Scan() {
+			}
+			if z.Err() == io.EOF {
+				t.Errorf("%s: expected error got %q", tt.desc, z.Token().String())
+				return
 			}
 		})
 	}

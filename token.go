@@ -101,7 +101,7 @@ func (t *Tokenizer) Scan() bool {
 	case isalpha(b):
 		t.token.Type = WordToken
 		t.token.Word = ""
-		for isalnum(b) {
+		for isalnum(b) || b == '-' {
 			t.token.Word += string(b)
 			b = t.readByte()
 		}
