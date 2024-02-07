@@ -36,7 +36,7 @@ type Token struct {
 	Octets []byte
 }
 
-// NewTokenizerFragment returns a new SVN Tokenizer for the given Reader.
+// NewTokenizer returns a new SVN Tokenizer for the given Reader.
 func NewTokenizer(r io.Reader) *Tokenizer {
 	z := &Tokenizer{
 		r: bufio.NewReader(r),
@@ -61,9 +61,8 @@ func (t *Tokenizer) Scan() bool {
 		return false
 	}
 	t.token.Type = ErrorToken
-	// var bytes []byte
-	var b byte
 
+	var b byte
 	for b = t.readByte(); isspace(b); b = t.readByte() {
 	}
 	if t.err != nil {
@@ -74,11 +73,11 @@ func (t *Tokenizer) Scan() bool {
 	case isnum(b):
 		var number uint
 		for isnum(b) {
-			t.token.Type = NumberToken
 			number *= 10
 			number += uint(b - '0')
 			b = t.readByte()
 		}
+		t.token.Type = NumberToken
 		t.token.Number = number
 		if b == ':' {
 			t.token.Type = StringToken

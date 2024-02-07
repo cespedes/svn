@@ -11,7 +11,7 @@ type tokenTest struct {
 	desc string
 	// The input to parse.
 	input string
-	// The string representations of the expected tokens, joined by '$'.
+	// The string representations of the expected tokens, joined by '^'.
 	golden string
 }
 
@@ -19,6 +19,11 @@ var tokenTests = []tokenTest{
 	{
 		"empty",
 		"",
+		"",
+	},
+	{
+		"spaces",
+		" \t \r \n ",
 		"",
 	},
 	// A number
@@ -49,7 +54,13 @@ var tokenTests = []tokenTest{
 	{
 		"svnserve",
 		"( success ( 2 2 ( ) ( edit-pipeline svndiff1 accepts-svndiff2 absent-entries commit-revprops depth log-revprops atomic-revprops partial-replay inherited-props ephemeral-txnprops file-revs-reverse list ) ) )  ",
-		"($success$($2$2$($)$($edit-pipeline$svndiff1$accepts-svndiff2$absent-entries$commit-revprops$depth$log-revprops$atomic-revprops$partial-replay$inherited-props$ephemeral-txnprops$file-revs-reverse$list$)$)$)",
+		"(^success^(^2^2^(^)^(^edit-pipeline^svndiff1^accepts-svndiff2^absent-entries^commit-revprops^depth^log-revprops^atomic-revprops^partial-replay^inherited-props^ephemeral-txnprops^file-revs-reverse^list^)^)^)",
+	},
+	// example with different types of spaces
+	{
+		"different spaces",
+		"(   word \t 22\n6:string ( sublist ) \r \v)\f",
+		"(^word^22^6:string^(^sublist^)^)",
 	},
 }
 
@@ -92,7 +103,7 @@ func TestTokenizer(t *testing.T) {
 		t.Run(tt.desc, func(t *testing.T) {
 			z := NewTokenizer(strings.NewReader(tt.input))
 			if tt.golden != "" {
-				for i, s := range strings.Split(tt.golden, "$") {
+				for i, s := range strings.Split(tt.golden, "^") {
 					if z.Scan() == false {
 						t.Errorf("%s token %d: want %q got error %v", tt.desc, i, s, z.Err())
 						return
