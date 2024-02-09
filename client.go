@@ -22,10 +22,18 @@ func NewClient(r io.Reader, w io.Writer) (*Client, error) {
 	}
 	c.i = NewItemizer(r)
 
-	item, err := c.i.Item()
-	if err != nil {
-		return c, err
-	}
-	fmt.Printf("greeting: %s\n", item)
 	return c, nil
+}
+
+func (c *Client) Connect(url string) error {
+	greet, err := c.i.Item()
+	if err != nil {
+		return err
+	}
+	params, err := ParseResponse(greet)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("greeting: %s\n", params)
+	return nil
 }
