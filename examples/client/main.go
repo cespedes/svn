@@ -8,7 +8,7 @@ import (
 )
 
 func main() {
-	c, err := svn.NewClient(os.Stdin, os.Stdout)
+	c, err := svn.Connect(os.Args[1])
 
 	if err != nil {
 		log.Fatal(err)
