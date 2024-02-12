@@ -58,15 +58,15 @@ func (c *Client) Connect(address string) error {
 		return err
 	}
 
-	greet, err := c.i.Item()
+	resp, err := c.i.Item()
 	if err != nil {
 		return err
 	}
-	params, err := ParseResponse(greet)
+	greet, err := ParseResponse(resp)
 	if err != nil {
 		return err
 	}
-	log.Printf("greeting: %s\n", params)
+	log.Printf("greeting: %s\n", greet)
 	return nil
 }
 

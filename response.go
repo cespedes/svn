@@ -33,7 +33,7 @@ func ParseResponse(i Item) ([]Item, error) {
 	if i.Type != ListType {
 		return nil, fmt.Errorf("syntax error: response type is not list")
 	}
-	if len(i.List) != 2 {
+	if len(i.List) < 2 {
 		return nil, fmt.Errorf("syntax error: response with %d fields", len(i.List))
 	}
 	if i.List[0].Type != WordType {
@@ -48,13 +48,13 @@ func ParseResponse(i Item) ([]Item, error) {
 	if i.List[0].Word != "failure" {
 		return nil, fmt.Errorf("syntax error: response must be `success` or `failure`")
 	}
-	if len(i.List[1].List) != 1 {
+	if len(i.List[1].List) < 1 {
 		return nil, fmt.Errorf("syntax error: error response must have a 1-element list")
 	}
 	if i.List[1].List[0].Type != ListType {
 		return nil, fmt.Errorf("syntax error: error response must be a list in a list")
 	}
-	if len(i.List[1].List[0].List) != 4 {
+	if len(i.List[1].List[0].List) < 4 {
 		return nil, fmt.Errorf("syntax error: error response must have 4 params, found %d", len(i.List[1].List[0].List))
 	}
 	if i.List[1].List[0].List[0].Type != NumberType ||
