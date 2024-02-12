@@ -50,6 +50,7 @@ func Marshal(v any) (Item, error) {
 			Type:   NumberType,
 			Number: uint(v.Uint()),
 		}, nil
+	// case reflect.Uintptr:
 	case reflect.Float32:
 		fallthrough
 	case reflect.Float64:
@@ -57,23 +58,53 @@ func Marshal(v any) (Item, error) {
 			Type:   NumberType,
 			Number: uint(v.Float()),
 		}, nil
+	// case reflect.Complex64:
+	// case reflect.Complex128:
+	case reflect.Array:
+		fallthrough
+	case reflect.Slice:
+		item := Item{
+			Type: ListType,
+		}
+		for i := range v.Len() {
+			it, err := Marshal(v.Index(i).Interface())
+			if err != nil {
+				return Item{}, err
+			}
+			item.List = append(item.List, it)
+		}
+		return item, nil
+	// case reflect.Chan:
+	// case reflect.Func:
+	// case reflect.Interface:
+	// case reflect.Map:
+	case reflect.Pointer:
+		if v.IsNil() {
+			return Item{}, nil
+		}
+		return Marshal(v.Elem().Interface())
 	case reflect.String:
 		return Item{
 			Type: WordType,
 			Word: v.String(),
 		}, nil
-	case reflect.Uintptr:
-	case reflect.Complex64:
-	case reflect.Complex128:
-	case reflect.Array:
-	case reflect.Chan:
-	case reflect.Func:
-	case reflect.Interface:
-	case reflect.Map:
-	case reflect.Pointer:
-	case reflect.Slice:
 	case reflect.Struct:
-	case reflect.UnsafePointer:
+		item := Item{
+			Type: ListType,
+		}
+		for i := range v.NumField() {
+			// do not marshal unexported fields:
+			if !v.Type().Field(i).IsExported() {
+				continue
+			}
+			it, err := Marshal(v.Field(i).Interface())
+			if err != nil {
+				return Item{}, err
+			}
+			item.List = append(item.List, it)
+		}
+		return item, nil
+	// case reflect.UnsafePointer:
 	default:
 		return Item{}, fmt.Errorf("unhandled kind %s", v.Kind())
 	}
