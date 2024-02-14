@@ -23,9 +23,8 @@ type Item struct {
 	// Type specifies the type of item, and which of the next fields is used
 	// to represent it.
 	Type   ItemType
-	Word   string
 	Number uint
-	Octets []byte
+	Text   string
 	List   []Item
 }
 
@@ -34,11 +33,11 @@ func (i Item) String() string {
 	s := ""
 	switch i.Type {
 	case WordType:
-		s = i.Word
+		s = i.Text
 	case NumberType:
 		s = fmt.Sprint(i.Number)
 	case StringType:
-		s = fmt.Sprintf("%d:%s", len(i.Octets), i.Octets)
+		s = fmt.Sprintf("%d:%s", len(i.Text), i.Text)
 	case ListType:
 		s = "( "
 		for _, elem := range i.List {
@@ -78,13 +77,13 @@ func (i *Itemizer) Item() (Item, error) {
 	switch tt.Type {
 	case WordToken:
 		item.Type = WordType
-		item.Word = tt.Word
+		item.Text = tt.Text
 	case NumberToken:
 		item.Type = NumberType
 		item.Number = tt.Number
 	case StringToken:
 		item.Type = StringType
-		item.Octets = tt.Octets
+		item.Text = tt.Text
 	case LeftParenToken:
 		item.Type = ListType
 		for {

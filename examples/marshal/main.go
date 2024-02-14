@@ -43,6 +43,7 @@ func main() {
 		t,
 		nil,
 		false,
+		[]byte("hola caracola"),
 	}
 	for _, v := range values {
 		i, err := svn.Marshal(v)

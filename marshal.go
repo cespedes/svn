@@ -24,45 +24,33 @@ import (
 func Marshal(v any) (Item, error) {
 	switch v := reflect.ValueOf(v); v.Kind() {
 	// case reflect.Bool:
-	case reflect.Int:
-		fallthrough
-	case reflect.Int8:
-		fallthrough
-	case reflect.Int16:
-		fallthrough
-	case reflect.Int32:
-		fallthrough
-	case reflect.Int64:
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
 		return Item{
 			Type:   NumberType,
 			Number: uint(v.Int()),
 		}, nil
-	case reflect.Uint:
-		fallthrough
-	case reflect.Uint8:
-		fallthrough
-	case reflect.Uint16:
-		fallthrough
-	case reflect.Uint32:
-		fallthrough
-	case reflect.Uint64:
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
 		return Item{
 			Type:   NumberType,
 			Number: uint(v.Uint()),
 		}, nil
 	// case reflect.Uintptr:
-	case reflect.Float32:
-		fallthrough
-	case reflect.Float64:
+	case reflect.Float32, reflect.Float64:
 		return Item{
 			Type:   NumberType,
 			Number: uint(v.Float()),
 		}, nil
 	// case reflect.Complex64:
 	// case reflect.Complex128:
-	case reflect.Array:
-		fallthrough
 	case reflect.Slice:
+		if v.Type().Elem().Kind() == reflect.Uint8 {
+			return Item{
+				Type: StringType,
+				Text: string(v.Bytes()),
+			}, nil
+		}
+		fallthrough
+	case reflect.Array:
 		item := Item{
 			Type: ListType,
 		}
@@ -88,7 +76,7 @@ func Marshal(v any) (Item, error) {
 	case reflect.String:
 		return Item{
 			Type: WordType,
-			Word: v.String(),
+			Text: v.String(),
 		}, nil
 	case reflect.Struct:
 		item := Item{
@@ -110,14 +98,12 @@ func Marshal(v any) (Item, error) {
 		return item, nil
 	// case reflect.UnsafePointer:
 	default:
-		return Item{}, fmt.Errorf("unhandled kind %q", v.Kind())
+		return Item{}, fmt.Errorf("cannot marshal kind %q", v.Kind())
 	}
-	return Item{}, errors.New("not implemented")
 }
 
-// Unmarshal parses the JSON-encoded data and stores the result in the
-// value pointed to by v. If v is nil or not a pointer, Unmarshal returns an
-// InvalidUnmarshalError.
+// Unmarshal parses an Item and copies it to the value pointed to by v.
+// If v is nil or not a pointer, Unmarshal returns an error.
 //
 // Unmarshal uses the inverse of the encodings that Marshal uses, allocating
 // slices and pointers as necessary, with the following additional
@@ -134,9 +120,8 @@ func Marshal(v any) (Item, error) {
 // To unmarshal an Item into an interface value, Unmarshal stores one of these
 // in the interface value:
 //
-//   - int, for integers
-//   - string, for words
-//   - []byte, for strings
+//   - int, for numbers
+//   - string, for words or strings
 //   - []any, for lists
 //
 // To unmarshal a list into a slice, Unmarshal resets the slice length
@@ -144,5 +129,75 @@ func Marshal(v any) (Item, error) {
 // to unmarshal an empty list into a slice, Unmarshal replaces the slice
 // with a new empty slice.
 func Unmarshal(item Item, v any) error {
+	rv := reflect.ValueOf(v)
+	if rv.Kind() != reflect.Pointer || rv.IsNil() {
+		return fmt.Errorf("Unmarshal: invalid kind %q", rv.Kind())
+	}
+	rv = rv.Elem()
+	return unmarshal(item, rv)
+}
+
+func unmarshal(item Item, v reflect.Value) error {
+	if v.Type() == reflect.TypeOf(item) {
+		v.Set(reflect.ValueOf(item))
+		return nil
+	}
+
+	switch item.Type {
+	case WordType:
+		if v.Kind() != reflect.String {
+			return fmt.Errorf("cannot unmarshal a Word into kind %q", v.Kind())
+		}
+		v.SetString(item.Text)
+		return nil
+	case StringType:
+		if v.Kind() != reflect.String {
+			return fmt.Errorf("cannot unmarshal a String into kind %q", v.Kind())
+		}
+		v.SetString(item.Text)
+		return nil
+	case NumberType:
+		switch v.Kind() {
+		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+			v.SetInt(int64(item.Number))
+			return nil
+		case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+			v.SetUint(uint64(item.Number))
+			return nil
+		}
+		return fmt.Errorf("cannot unmarshal a Number into kind %q", v.Kind())
+	case ListType:
+		switch v.Kind() {
+		case reflect.Struct:
+			for i := 0; i < min(len(item.List), v.NumField()); i++ {
+				// unmarshaling to unexported fields is forbidden:
+				if !v.Type().Field(i).IsExported() {
+					return fmt.Errorf("cannot unmarshal into unexported field")
+				}
+				err := unmarshal(item.List[i], v.Field(i))
+				if err != nil {
+					return err
+				}
+			}
+			return nil
+		case reflect.Slice:
+			if len(item.List) > v.Len() {
+				v.Grow(len(item.List) - v.Len())
+				v.SetLen(len(item.List))
+			}
+			for i := range len(item.List) {
+				err := unmarshal(item.List[i], v.Index(i))
+				if err != nil {
+					return err
+				}
+			}
+			return nil
+		default:
+			return fmt.Errorf("unmarshaling from ListType into kind %q is not implemented", v.Kind())
+		}
+	}
+	v.SetInt(42)
+	return nil
+
 	return errors.New("not implemented")
 }

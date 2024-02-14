@@ -31,9 +31,8 @@ type Tokenizer struct {
 // There are only 5 types of tokens: word, number, string, left and right parenthesis.
 type Token struct {
 	Type   TokenType
-	Word   string
 	Number uint
-	Octets []byte
+	Text   string
 }
 
 // NewTokenizer returns a new SVN Tokenizer for the given Reader.
@@ -81,14 +80,15 @@ func (t *Tokenizer) Scan() bool {
 		t.token.Number = number
 		if b == ':' {
 			t.token.Type = StringToken
-			t.token.Octets = make([]byte, number)
-			_, err := io.ReadFull(t.r, t.token.Octets)
+			octets := make([]byte, number)
+			_, err := io.ReadFull(t.r, octets)
 			if err != nil {
 				t.token.Type = ErrorToken
 				t.done = true
 				t.err = err
 				return false
 			}
+			t.token.Text = string(octets)
 			b = t.readByte()
 		}
 	case b == '(':
@@ -99,9 +99,9 @@ func (t *Tokenizer) Scan() bool {
 		b = t.readByte()
 	case isalpha(b):
 		t.token.Type = WordToken
-		t.token.Word = ""
+		t.token.Text = ""
 		for isalnum(b) || b == '-' {
-			t.token.Word += string(b)
+			t.token.Text += string(b)
 			b = t.readByte()
 		}
 	default:
@@ -137,11 +137,11 @@ func (t Token) String() string {
 	case ErrorToken:
 		s = "**ERROR**"
 	case WordToken:
-		s = t.Word
+		s = t.Text
 	case NumberToken:
 		s = fmt.Sprint(t.Number)
 	case StringToken:
-		s = fmt.Sprintf("%d:%s", len(t.Octets), t.Octets)
+		s = fmt.Sprintf("%d:%s", len(t.Text), t.Text)
 	case LeftParenToken:
 		s = "("
 	case RightParenToken:

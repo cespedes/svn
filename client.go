@@ -35,6 +35,9 @@ func Connect(url string) (*Client, error) {
 
 // Connect establishes a connection to a SVN server, using the given address
 // to find out know how to connect to it.
+//
+// Right now, it works only with "file" URLs, invoking "svnserve -t" to connect
+// to a server.
 func (c *Client) Connect(address string) error {
 	u, err := url.Parse(address)
 	if err != nil {
@@ -58,15 +61,25 @@ func (c *Client) Connect(address string) error {
 		return err
 	}
 
-	resp, err := c.i.Item()
+	raw, err := c.i.Item()
 	if err != nil {
 		return err
 	}
-	greet, err := ParseResponse(resp)
+	resp, err := ParseResponse(raw)
 	if err != nil {
 		return err
 	}
-	log.Printf("greeting: %s\n", greet)
+	var greet struct {
+		MinVer       int
+		MaxVer       int
+		Mechs        Item
+		Capabilities []string
+	}
+	err = Unmarshal(resp, &greet)
+	if err != nil {
+		return fmt.Errorf("parsing greeting: %w", err)
+	}
+	log.Printf("greeting: %+v\n", greet)
 	return nil
 }
 

@@ -11,6 +11,11 @@ const (
 	ResponseFailure
 )
 
+type Response struct {
+	Type   string
+	Params Item
+}
+
 type Error struct {
 	AprErr  int
 	Message string
@@ -29,45 +34,29 @@ func (e Error) Error() string {
 // ParseResponse expects an item following the prototype of "command response"
 // and returns the list of params if the type is "success".
 // It returns error otherwise.
-func ParseResponse(i Item) ([]Item, error) {
-	if i.Type != ListType {
-		return nil, fmt.Errorf("syntax error: response type is not list")
+func ParseResponse(i Item) (Item, error) {
+	var resp Response
+	err := Unmarshal(i, &resp)
+	if err != nil {
+		return Item{}, err
 	}
-	if len(i.List) < 2 {
-		return nil, fmt.Errorf("syntax error: response with %d fields", len(i.List))
+	if resp.Params.Type != ListType {
+		return Item{}, fmt.Errorf("syntax error: response type must be a list")
 	}
-	if i.List[0].Type != WordType {
-		return nil, fmt.Errorf("syntax error: first item in response is not a word")
-	}
-	if i.List[1].Type != ListType {
-		return nil, fmt.Errorf("syntax error: second item in response is not a list")
-	}
-	if i.List[0].Word == "success" {
-		return i.List[1].List, nil
-	}
-	if i.List[0].Word != "failure" {
-		return nil, fmt.Errorf("syntax error: response must be `success` or `failure`")
-	}
-	if len(i.List[1].List) < 1 {
-		return nil, fmt.Errorf("syntax error: error response must have a 1-element list")
-	}
-	if i.List[1].List[0].Type != ListType {
-		return nil, fmt.Errorf("syntax error: error response must be a list in a list")
-	}
-	if len(i.List[1].List[0].List) < 4 {
-		return nil, fmt.Errorf("syntax error: error response must have 4 params, found %d", len(i.List[1].List[0].List))
-	}
-	if i.List[1].List[0].List[0].Type != NumberType ||
-		i.List[1].List[0].List[1].Type != StringType ||
-		i.List[2].List[0].List[1].Type != StringType ||
-		i.List[3].List[0].List[1].Type != NumberType {
-		return nil, fmt.Errorf("syntax error: error response params have incorrect types")
-	}
-	return nil, Error{
-		AprErr:  int(i.List[1].List[0].List[1].Number),
-		Message: string(i.List[1].List[0].List[1].Octets),
-		File:    string(i.List[1].List[0].List[2].Octets),
-		Line:    int(i.List[1].List[0].List[3].Number),
+	switch resp.Type {
+	case "success":
+		return resp.Params, nil
+	case "failure":
+		var errResp struct {
+			err Error
+		}
+		err = Unmarshal(resp.Params, &errResp)
+		if err != nil {
+			return Item{}, err
+		}
+		return Item{}, errResp.err
+	default:
+		return Item{}, fmt.Errorf("syntax error: response must be `success` or `failure`")
 	}
 }
 
