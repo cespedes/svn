@@ -11,7 +11,8 @@ import (
 type ItemType int
 
 const (
-	WordType ItemType = iota
+	InvalidType ItemType = iota
+	WordType
 	NumberType
 	StringType
 	ListType

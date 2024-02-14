@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"log"
 
 	"github.com/cespedes/svn"
 )
@@ -42,12 +41,14 @@ func main() {
 		}{A: 42, B: "forty-two"},
 		T{A: 1, B: 2},
 		t,
-		// nil,
+		nil,
+		false,
 	}
 	for _, v := range values {
 		i, err := svn.Marshal(v)
 		if err != nil {
-			log.Fatalf("Marshaling %v: %v", v, err)
+			fmt.Printf("Error marshaling %v: %v\n", v, err)
+			continue
 		}
 		fmt.Printf("Marshaling %v: %v\n", v, i)
 	}

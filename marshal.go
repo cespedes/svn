@@ -23,7 +23,7 @@ import (
 // values encode as strings.
 func Marshal(v any) (Item, error) {
 	switch v := reflect.ValueOf(v); v.Kind() {
-	case reflect.Bool:
+	// case reflect.Bool:
 	case reflect.Int:
 		fallthrough
 	case reflect.Int8:
@@ -71,7 +71,9 @@ func Marshal(v any) (Item, error) {
 			if err != nil {
 				return Item{}, err
 			}
-			item.List = append(item.List, it)
+			if it.Type != InvalidType {
+				item.List = append(item.List, it)
+			}
 		}
 		return item, nil
 	// case reflect.Chan:
@@ -101,12 +103,14 @@ func Marshal(v any) (Item, error) {
 			if err != nil {
 				return Item{}, err
 			}
-			item.List = append(item.List, it)
+			if it.Type != InvalidType {
+				item.List = append(item.List, it)
+			}
 		}
 		return item, nil
 	// case reflect.UnsafePointer:
 	default:
-		return Item{}, fmt.Errorf("unhandled kind %s", v.Kind())
+		return Item{}, fmt.Errorf("unhandled kind %q", v.Kind())
 	}
 	return Item{}, errors.New("not implemented")
 }
