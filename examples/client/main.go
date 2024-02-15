@@ -13,5 +13,6 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	log.Printf("# client is %v\n", c)
+
+	_ = c
 }

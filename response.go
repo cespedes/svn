@@ -48,13 +48,13 @@ func ParseResponse(i Item) (Item, error) {
 		return resp.Params, nil
 	case "failure":
 		var errResp struct {
-			err Error
+			Err Error
 		}
 		err = Unmarshal(resp.Params, &errResp)
 		if err != nil {
 			return Item{}, err
 		}
-		return Item{}, errResp.err
+		return Item{}, errResp.Err
 	default:
 		return Item{}, fmt.Errorf("syntax error: response must be `success` or `failure`")
 	}

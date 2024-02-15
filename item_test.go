@@ -15,7 +15,7 @@ type itemTest struct {
 	golden string
 }
 
-var itemTests = []tokenTest{
+var itemTests = []itemTest{
 	// A number
 	{
 		"number",
@@ -55,7 +55,7 @@ type itemErrorTest struct {
 	input string
 }
 
-var itemErrorTests = []tokenErrorTest{
+var itemErrorTests = []itemErrorTest{
 	{
 		"empty",
 		"",

@@ -44,6 +44,10 @@ func main() {
 		nil,
 		false,
 		[]byte("hola caracola"),
+		svn.Item{
+			Type:   svn.NumberType,
+			Number: 1256,
+		},
 	}
 	for _, v := range values {
 		i, err := svn.Marshal(v)
@@ -51,6 +55,6 @@ func main() {
 			fmt.Printf("Error marshaling %v: %v\n", v, err)
 			continue
 		}
-		fmt.Printf("Marshaling %v: %v\n", v, i)
+		fmt.Printf("Marshaling %#v: %v\n", v, i)
 	}
 }

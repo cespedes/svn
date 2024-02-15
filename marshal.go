@@ -22,6 +22,9 @@ import (
 // Array, slice and struct values encode as lists, except that []byte
 // values encode as strings.
 func Marshal(v any) (Item, error) {
+	if i, ok := v.(Item); ok {
+		return i, nil
+	}
 	switch v := reflect.ValueOf(v); v.Kind() {
 	// case reflect.Bool:
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
@@ -151,11 +154,17 @@ func unmarshal(item Item, v reflect.Value) error {
 		v.SetString(item.Text)
 		return nil
 	case StringType:
-		if v.Kind() != reflect.String {
-			return fmt.Errorf("cannot unmarshal a String into kind %q", v.Kind())
+		switch v.Kind() {
+		case reflect.String:
+			v.SetString(item.Text)
+			return nil
+		case reflect.Slice:
+			if v.Type().Elem().Kind() == reflect.Uint8 {
+				v.SetBytes([]byte(item.Text))
+				return nil
+			}
 		}
-		v.SetString(item.Text)
-		return nil
+		return fmt.Errorf("cannot unmarshal a String into kind %q", v.Kind())
 	case NumberType:
 		switch v.Kind() {
 		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
@@ -172,7 +181,7 @@ func unmarshal(item Item, v reflect.Value) error {
 			for i := 0; i < min(len(item.List), v.NumField()); i++ {
 				// unmarshaling to unexported fields is forbidden:
 				if !v.Type().Field(i).IsExported() {
-					return fmt.Errorf("cannot unmarshal into unexported field")
+					return fmt.Errorf("cannot unmarshal into unexported field (i=%d)", i)
 				}
 				err := unmarshal(item.List[i], v.Field(i))
 				if err != nil {
@@ -196,8 +205,6 @@ func unmarshal(item Item, v reflect.Value) error {
 			return fmt.Errorf("unmarshaling from ListType into kind %q is not implemented", v.Kind())
 		}
 	}
-	v.SetInt(42)
-	return nil
 
 	return errors.New("not implemented")
 }
