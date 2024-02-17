@@ -13,13 +13,17 @@ const (
 	SvnClient  = "GoSVN/0.0.0"
 )
 
+type Conn struct {
+	r io.Reader
+	w io.Writer
+	i *Itemizer
+}
+
 // A Client is a SVN client.  Its zero value is not usable; it has to be
 // connected to a server using [Client.Connect].
 type Client struct {
-	r   io.Reader
-	w   io.Writer
-	i   *Itemizer
-	cmd *exec.Cmd
+	conn Conn
+	cmd  *exec.Cmd
 }
 
 // NewClient returns an empty [Client]
@@ -69,7 +73,7 @@ func (c *Client) Connect(address string) error {
 		Mechs        Item
 		Capabilities []string
 	}
-	err = c.ReadResponse(&greet)
+	err = c.conn.ReadResponse(&greet)
 	if err != nil {
 		return fmt.Errorf("reading greeting: %w", err)
 	}
@@ -77,7 +81,7 @@ func (c *Client) Connect(address string) error {
 	if greet.MinVer > SvnVersion || greet.MaxVer < SvnVersion {
 		return fmt.Errorf("unsupported SVN version range (%d .. %d)", greet.MinVer, greet.MaxVer)
 	}
-	err = c.Write([]any{
+	err = c.conn.Write([]any{
 		SvnVersion,
 		//[]string{"edit-pipeline", "svndiff1", "accepts-svndiff2", "absent-entries", "depth", "mergeinfo", "log-revprops"},
 		[]string{"edit-pipeline"},
@@ -93,12 +97,12 @@ func (c *Client) Connect(address string) error {
 		Mechanisms []string
 		Realm      string
 	}
-	err = c.ReadResponse(&authRequest)
+	err = c.conn.ReadResponse(&authRequest)
 	if err != nil {
 		return fmt.Errorf("reading auth-request: %w", err)
 	}
 	log.Printf("auth-request: %+v\n", authRequest)
-	err = c.Write([]any{
+	err = c.conn.Write([]any{
 		"EXTERNAL",
 		[]any{
 			[]byte{},
@@ -108,7 +112,7 @@ func (c *Client) Connect(address string) error {
 		return fmt.Errorf("sending auth response: %w", err)
 	}
 	var item Item
-	err = c.ReadResponse(&item)
+	err = c.conn.ReadResponse(&item)
 	if err != nil {
 		return fmt.Errorf("reading auth response: %w", err)
 	}
@@ -118,7 +122,7 @@ func (c *Client) Connect(address string) error {
 		URL          string
 		Capabilities []string
 	}
-	err = c.ReadResponse(&reposInfo)
+	err = c.conn.ReadResponse(&reposInfo)
 	if err != nil {
 		return fmt.Errorf("reading repos-info: %w", err)
 	}
@@ -137,15 +141,14 @@ func (c *Client) exec(name string, arg ...string) error {
 	if err != nil {
 		return err
 	}
-	c.r = stdout
-	c.w = stdin
-	c.i = NewItemizer(c.r)
+	c.conn.r = stdout
+	c.conn.w = stdin
 	return c.cmd.Start()
 }
 
 // Write converts "what" into an Item,
-// if needed, and then sends it to the server.
-func (c *Client) Write(what any) error {
+// if needed, and then sends it to the other end of the connection.
+func (c *Conn) Write(what any) error {
 	item, err := Marshal(what)
 	if err != nil {
 		return nil
@@ -154,9 +157,12 @@ func (c *Client) Write(what any) error {
 	return err
 }
 
-// Read reads an Item from the server,
+// Read reads an Item from the connection,
 // and stores it in "where", converting its type if needed.
-func (c *Client) Read(where any) error {
+func (c *Conn) Read(where any) error {
+	if c.i == nil {
+		c.i = NewItemizer(c.r)
+	}
 	item, err := c.i.Item()
 	if err != nil {
 		return err
@@ -164,8 +170,9 @@ func (c *Client) Read(where any) error {
 	return Unmarshal(item, where)
 }
 
-func (c *Client) ReadResponse(where any) error {
-	item, err := c.i.Item()
+func (c *Conn) ReadResponse(where any) error {
+	var item Item
+	err := c.Read(&item)
 	if err != nil {
 		return err
 	}
@@ -174,4 +181,23 @@ func (c *Client) ReadResponse(where any) error {
 		return err
 	}
 	return Unmarshal(resp, where)
+}
+
+// Close closes the connection.
+// It calls r.Close() and w.Close() if they are available.
+func (c *Conn) Close() error {
+	if cr, ok := c.r.(io.Closer); ok {
+		err := cr.Close()
+		if err != nil {
+			return err
+		}
+	}
+	if cw, ok := c.w.(io.Closer); ok {
+		err := cw.Close()
+		if err != nil {
+			return err
+		}
+	}
+	c.i = nil
+	return nil
 }
