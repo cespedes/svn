@@ -2,22 +2,12 @@ package svn
 
 import (
 	"fmt"
-	"io"
 	"log"
 	"net/url"
 	"os/exec"
 )
 
-const (
-	SvnVersion = 2
-	SvnClient  = "GoSVN/0.0.0"
-)
-
-type Conn struct {
-	r io.Reader
-	w io.Writer
-	i *Itemizer
-}
+const SvnClient = "GoSVN/0.0.0"
 
 // A Client is a SVN client.  Its zero value is not usable; it has to be
 // connected to a server using [Client.Connect].
@@ -77,9 +67,9 @@ func (c *Client) Connect(address string) error {
 	if err != nil {
 		return fmt.Errorf("reading greeting: %w", err)
 	}
-	log.Printf("greeting: %+v\n", greet)
+	log.Printf("client: greeting: %+v\n", greet)
 	if greet.MinVer > SvnVersion || greet.MaxVer < SvnVersion {
-		return fmt.Errorf("unsupported SVN version range (%d .. %d)", greet.MinVer, greet.MaxVer)
+		return fmt.Errorf("client: unsupported SVN version range (%d .. %d)", greet.MinVer, greet.MaxVer)
 	}
 	err = c.conn.Write([]any{
 		SvnVersion,
@@ -90,7 +80,7 @@ func (c *Client) Connect(address string) error {
 		[]any{},
 	})
 	if err != nil {
-		return fmt.Errorf("sending greeting response: %w", err)
+		return fmt.Errorf("client: sending greeting response: %w", err)
 	}
 
 	var authRequest struct {
@@ -99,7 +89,7 @@ func (c *Client) Connect(address string) error {
 	}
 	err = c.conn.ReadResponse(&authRequest)
 	if err != nil {
-		return fmt.Errorf("reading auth-request: %w", err)
+		return fmt.Errorf("client: reading auth-request: %w", err)
 	}
 	log.Printf("auth-request: %+v\n", authRequest)
 	err = c.conn.Write([]any{
@@ -109,12 +99,12 @@ func (c *Client) Connect(address string) error {
 		},
 	})
 	if err != nil {
-		return fmt.Errorf("sending auth response: %w", err)
+		return fmt.Errorf("client: sending auth response: %w", err)
 	}
 	var item Item
 	err = c.conn.ReadResponse(&item)
 	if err != nil {
-		return fmt.Errorf("reading auth response: %w", err)
+		return fmt.Errorf("client: reading auth response: %w", err)
 	}
 
 	var reposInfo struct {
@@ -144,60 +134,4 @@ func (c *Client) exec(name string, arg ...string) error {
 	c.conn.r = stdout
 	c.conn.w = stdin
 	return c.cmd.Start()
-}
-
-// Write converts "what" into an Item,
-// if needed, and then sends it to the other end of the connection.
-func (c *Conn) Write(what any) error {
-	item, err := Marshal(what)
-	if err != nil {
-		return nil
-	}
-	_, err = c.w.Write([]byte(item.String() + " "))
-	return err
-}
-
-// Read reads an Item from the connection,
-// and stores it in "where", converting its type if needed.
-func (c *Conn) Read(where any) error {
-	if c.i == nil {
-		c.i = NewItemizer(c.r)
-	}
-	item, err := c.i.Item()
-	if err != nil {
-		return err
-	}
-	return Unmarshal(item, where)
-}
-
-func (c *Conn) ReadResponse(where any) error {
-	var item Item
-	err := c.Read(&item)
-	if err != nil {
-		return err
-	}
-	resp, err := ParseResponse(item)
-	if err != nil {
-		return err
-	}
-	return Unmarshal(resp, where)
-}
-
-// Close closes the connection.
-// It calls r.Close() and w.Close() if they are available.
-func (c *Conn) Close() error {
-	if cr, ok := c.r.(io.Closer); ok {
-		err := cr.Close()
-		if err != nil {
-			return err
-		}
-	}
-	if cw, ok := c.w.(io.Closer); ok {
-		err := cw.Close()
-		if err != nil {
-			return err
-		}
-	}
-	c.i = nil
-	return nil
 }
