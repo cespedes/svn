@@ -7,8 +7,8 @@ import (
 	"github.com/cespedes/svn"
 )
 
-func callback(item svn.Item, conn svn.Conn) error {
-	log.Printf("item: %v\n", item)
+func callback(command svn.Command, item svn.Item, conn svn.Conn) error {
+	log.Printf("command: %v\n", command)
 	return nil
 }
 
