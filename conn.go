@@ -31,6 +31,20 @@ func (c *Conn) WriteSuccess(what any) error {
 	})
 }
 
+func (c *Conn) WriteFailure(what error) error {
+	return c.Write([]any{
+		"failure",
+		[]any{
+			[]any{
+				21005,
+				[]byte(what.Error()),
+				[]byte{},
+				0,
+			},
+		},
+	})
+}
+
 // Read reads an Item from the connection,
 // and stores it in "where", converting its type if needed.
 func (c *Conn) Read(where any) error {
