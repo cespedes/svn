@@ -147,28 +147,38 @@ func (c *Client) handleAuth() error {
 	return nil
 }
 
+func sendCommand[Output any](c *Client, cmd string, params any) (Output, error) {
+	var out Output
+
+	err := c.conn.Write([]any{
+		cmd,
+		params,
+	})
+	if err != nil {
+		return out, fmt.Errorf("client: sending %s: %w", cmd, err)
+	}
+	if err = c.handleAuth(); err != nil {
+		return out, err
+	}
+
+	err = c.conn.ReadResponse(&out)
+	return out, err
+}
+
 // GetLatestRev sends a "get-latest-rev" command, asking for
 // the latest revision number in the repository.
 func (c *Client) GetLatestRev() (int, error) {
-	err := c.conn.Write([]any{
-		"get-latest-rev",
-		[]any{},
-	})
-	if err != nil {
-		return -1, fmt.Errorf("client: sending get-latest-rev: %w", err)
-	}
-
-	if err = c.handleAuth(); err != nil {
-		return -1, err
-	}
-
-	var rev struct {
+	type Rev struct {
 		Rev int
 	}
-	err = c.conn.ReadResponse(&rev)
-	if err != nil {
-		return -1, err
-	}
+	rev, err := sendCommand[Rev](c, "get-latest-rev", []any{})
+	return rev.Rev, err
+}
 
-	return rev.Rev, nil
+// Stat sends a "stat" command, asking for the status of a path in a revision
+func (c *Client) Stat(path string, rev int) (Item, error) {
+	input := []any{[]byte(path), []int{rev}}
+
+	item, err := sendCommand[Item](c, "stat", input)
+	return item, err
 }
