@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"log"
 	"os"
 
@@ -14,5 +15,10 @@ func main() {
 		log.Fatal(err)
 	}
 
-	_ = c
+	rev, err := c.GetLatestRev()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	fmt.Printf("Last revision: %d\n", rev)
 }

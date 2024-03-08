@@ -83,28 +83,9 @@ func (c *Client) Connect(address string) error {
 		return fmt.Errorf("client: sending greeting response: %w", err)
 	}
 
-	var authRequest struct {
-		Mechanisms []string
-		Realm      string
-	}
-	err = c.conn.ReadResponse(&authRequest)
+	err = c.handleAuth()
 	if err != nil {
-		return fmt.Errorf("client: reading auth-request: %w", err)
-	}
-	log.Printf("auth-request: %+v\n", authRequest)
-	err = c.conn.Write([]any{
-		"EXTERNAL",
-		[]any{
-			[]byte{},
-		},
-	})
-	if err != nil {
-		return fmt.Errorf("client: sending auth response: %w", err)
-	}
-	var item Item
-	err = c.conn.ReadResponse(&item)
-	if err != nil {
-		return fmt.Errorf("client: reading auth response: %w", err)
+		return err
 	}
 
 	var reposInfo struct {
@@ -134,4 +115,60 @@ func (c *Client) exec(name string, arg ...string) error {
 	c.conn.r = stdout
 	c.conn.w = stdin
 	return c.cmd.Start()
+}
+
+func (c *Client) handleAuth() error {
+	var authRequest struct {
+		Mechanisms []string
+		Realm      string
+	}
+	err := c.conn.ReadResponse(&authRequest)
+	if err != nil {
+		return fmt.Errorf("client: reading auth-request: %w", err)
+	}
+	if len(authRequest.Mechanisms) == 0 {
+		return nil
+	}
+	log.Printf("auth-request: %+v\n", authRequest)
+	err = c.conn.Write([]any{
+		"EXTERNAL",
+		[]any{
+			[]byte{},
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("client: sending auth response: %w", err)
+	}
+	var item Item
+	err = c.conn.ReadResponse(&item)
+	if err != nil {
+		return fmt.Errorf("client: reading auth response: %w", err)
+	}
+	return nil
+}
+
+// GetLatestRev sends a "get-latest-rev" command, asking for
+// the latest revision number in the repository.
+func (c *Client) GetLatestRev() (int, error) {
+	err := c.conn.Write([]any{
+		"get-latest-rev",
+		[]any{},
+	})
+	if err != nil {
+		return -1, fmt.Errorf("client: sending get-latest-rev: %w", err)
+	}
+
+	if err = c.handleAuth(); err != nil {
+		return -1, err
+	}
+
+	var rev struct {
+		Rev int
+	}
+	err = c.conn.ReadResponse(&rev)
+	if err != nil {
+		return -1, err
+	}
+
+	return rev.Rev, nil
 }
