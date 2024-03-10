@@ -19,6 +19,8 @@ import (
 //
 // String values encode as words.
 //
+// Bool values encode as words "true" or "false".
+//
 // Array, slice and struct values encode as lists, except that []byte
 // values encode as strings.
 func Marshal(v any) (Item, error) {
@@ -26,7 +28,11 @@ func Marshal(v any) (Item, error) {
 		return i, nil
 	}
 	switch v := reflect.ValueOf(v); v.Kind() {
-	// case reflect.Bool:
+	case reflect.Bool:
+		return Item{
+			Type: WordType,
+			Text: fmt.Sprint(v),
+		}, nil
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
 		return Item{
 			Type:   NumberType,
@@ -148,6 +154,15 @@ func unmarshal(item Item, v reflect.Value) error {
 
 	switch item.Type {
 	case WordType:
+		if v.Kind() == reflect.Bool {
+			if item.Text == "true" {
+				v.SetBool(true)
+				return nil
+			} else if item.Text == "false" {
+				v.SetBool(false)
+				return nil
+			}
+		}
 		if v.Kind() != reflect.String {
 			return fmt.Errorf("cannot unmarshal a Word into kind %q", v.Kind())
 		}
@@ -202,7 +217,11 @@ func unmarshal(item Item, v reflect.Value) error {
 			}
 			return nil
 		default:
-			return fmt.Errorf("unmarshaling from ListType into kind %q is not implemented", v.Kind())
+			if len(item.List) > 0 {
+				return unmarshal(item.List[0], v)
+			}
+			return nil
+			//return fmt.Errorf("unmarshaling from ListType into kind %q is not implemented", v.Kind())
 		}
 	}
 

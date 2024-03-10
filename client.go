@@ -175,10 +175,29 @@ func (c *Client) GetLatestRev() (int, error) {
 	return rev.Rev, err
 }
 
-// Stat sends a "stat" command, asking for the status of a path in a revision
-func (c *Client) Stat(path string, rev int) (Item, error) {
-	input := []any{[]byte(path), []int{rev}}
+type Stat struct {
+	Kind        string
+	Size        uint64
+	HasProps    bool
+	CreatedRev  uint
+	CreatedDate string
+	LastAuthor  string
+}
 
-	item, err := sendCommand[Item](c, "stat", input)
-	return item, err
+// Stat sends a "stat" command, asking for the status of a path in a revision
+func (c *Client) Stat(path string, revs ...int) (Stat, error) {
+	rev := []int{}
+	if len(revs) > 0 {
+		rev = []int{revs[0]}
+	}
+	input := []any{[]byte(path), rev}
+
+	type Foo struct {
+		Bar struct {
+			Baz Stat
+		}
+	}
+
+	foo, err := sendCommand[Foo](c, "stat", input)
+	return foo.Bar.Baz, err
 }

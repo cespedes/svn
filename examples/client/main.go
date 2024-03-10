@@ -21,9 +21,10 @@ func main() {
 	}
 	fmt.Printf("Last revision: %d\n", rev)
 
-	item, err := c.Stat("", rev)
+	//item, err := c.Stat("", rev)
+	stat, err := c.Stat("/")
 	if err != nil {
 		log.Fatal(err)
 	}
-	fmt.Printf("Stat: %v\n", item)
+	fmt.Printf("Stat: %+v\n", stat)
 }
