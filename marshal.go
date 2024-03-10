@@ -198,6 +198,9 @@ func unmarshal(item Item, v reflect.Value) error {
 		}
 		switch v.Kind() {
 		case reflect.Struct:
+			if v.NumField() == 1 && v.Type().Field(0).IsExported() && v.Field(0).Kind() == reflect.Struct {
+				return unmarshal(item, v.Field(0))
+			}
 			for i := 0; i < min(len(item.List), v.NumField()); i++ {
 				// unmarshaling to unexported fields is forbidden:
 				if !v.Type().Field(i).IsExported() {
