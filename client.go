@@ -168,11 +168,7 @@ func sendCommand[Output any](c *Client, cmd string, params any) (Output, error) 
 // GetLatestRev sends a "get-latest-rev" command, asking for
 // the latest revision number in the repository.
 func (c *Client) GetLatestRev() (int, error) {
-	type Rev struct {
-		Rev int
-	}
-	rev, err := sendCommand[Rev](c, "get-latest-rev", []any{})
-	return rev.Rev, err
+	return sendCommand[int](c, "get-latest-rev", []any{})
 }
 
 type Stat struct {
@@ -192,12 +188,5 @@ func (c *Client) Stat(path string, revs ...int) (Stat, error) {
 	}
 	input := []any{[]byte(path), rev}
 
-	type Foo struct {
-		Bar struct {
-			Baz Stat
-		}
-	}
-
-	foo, err := sendCommand[Foo](c, "stat", input)
-	return foo.Bar.Baz, err
+	return sendCommand[Stat](c, "stat", input)
 }

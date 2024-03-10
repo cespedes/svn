@@ -191,6 +191,11 @@ func unmarshal(item Item, v reflect.Value) error {
 		}
 		return fmt.Errorf("cannot unmarshal a Number into kind %q", v.Kind())
 	case ListType:
+		// This converts any "( ( ... ) )" into "( ... )"
+		// TODO: not sure if this will always be correct
+		if len(item.List) == 1 && item.List[0].Type == ListType {
+			return unmarshal(item.List[0], v)
+		}
 		switch v.Kind() {
 		case reflect.Struct:
 			for i := 0; i < min(len(item.List), v.NumField()); i++ {
@@ -221,7 +226,6 @@ func unmarshal(item Item, v reflect.Value) error {
 				return unmarshal(item.List[0], v)
 			}
 			return nil
-			//return fmt.Errorf("unmarshaling from ListType into kind %q is not implemented", v.Kind())
 		}
 	}
 
