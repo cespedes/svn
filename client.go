@@ -180,13 +180,69 @@ type Stat struct {
 	LastAuthor  string
 }
 
-// Stat sends a "stat" command, asking for the status of a path in a revision
-func (c *Client) Stat(path string, revs ...int) (Stat, error) {
-	rev := []int{}
-	if len(revs) > 0 {
-		rev = []int{revs[0]}
+// Stat sends a "stat" command, asking for the status of a path in a revision.
+// "rev" can be nil or a pointer to an integer.
+func (c *Client) Stat(path string, rev *int) (Stat, error) {
+	lrev := []int{}
+	if rev != nil {
+		lrev = append(lrev, *rev)
 	}
-	input := []any{[]byte(path), rev}
+	input := []any{[]byte(path), lrev}
 
 	return sendCommand[Stat](c, "stat", input)
+}
+
+type Dirent struct {
+	Path        string
+	Kind        string
+	Size        uint64
+	HasProps    bool
+	CreatedRev  uint
+	CreatedDate string
+	LastAuthor  string
+}
+
+// List sends a "list" command, asking for list of files
+func (c *Client) List(path string, rev *int, depth string, fields []string) ([]Dirent, error) {
+	lrev := []int{}
+	if rev != nil {
+		lrev = append(lrev, *rev)
+	}
+	cmd := "list"
+	params := []any{
+		[]byte(path),
+		lrev,
+		depth,
+		fields,
+	}
+	err := c.conn.Write([]any{
+		cmd,
+		params,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("client: sending %s: %w", cmd, err)
+	}
+	if err = c.handleAuth(); err != nil {
+		return nil, err
+	}
+
+	var dirents []Dirent
+	for {
+		var item Item
+		err = c.conn.Read(&item)
+		if err != nil {
+			return nil, fmt.Errorf("client: List: reading dirent entry: %w", err)
+		}
+		if item.Type == WordType && item.Text == "done" {
+			break
+		}
+		var dirent Dirent
+		err = Unmarshal(item, &dirent)
+		if err != nil {
+			return nil, fmt.Errorf("client: List: unmarshaling dirent entry: %w", err)
+		}
+		dirents = append(dirents, dirent)
+	}
+
+	return dirents, nil
 }
