@@ -2,7 +2,6 @@ package svn
 
 import (
 	"fmt"
-	"log"
 	"net/url"
 	"os/exec"
 )
@@ -53,6 +52,8 @@ func (c *Client) Connect(address string) error {
 			"svnserve",
 			"-t",
 		}
+		// Standard "svnserve" does not work if we tell it we want a "file:" scheme:
+		u.Scheme = "svn+ssh"
 	case "svn+ssh":
 		host := u.Host
 		if u.User != nil {
@@ -87,7 +88,7 @@ func (c *Client) Connect(address string) error {
 	if err != nil {
 		return fmt.Errorf("reading greeting: %w", err)
 	}
-	log.Printf("client: greeting: %+v\n", greet)
+	// log.Printf("client: greeting: %+v\n", greet)
 	if greet.MinVer > SvnVersion || greet.MaxVer < SvnVersion {
 		return fmt.Errorf("client: unsupported SVN version range (%d .. %d)", greet.MinVer, greet.MaxVer)
 	}
@@ -117,7 +118,7 @@ func (c *Client) Connect(address string) error {
 	if err != nil {
 		return fmt.Errorf("reading repos-info: %w", err)
 	}
-	log.Printf("repos-info: %+v\n", reposInfo)
+	// log.Printf("repos-info: %+v\n", reposInfo)
 
 	return nil
 }
@@ -149,7 +150,7 @@ func (c *Client) handleAuth() error {
 	if len(authRequest.Mechanisms) == 0 {
 		return nil
 	}
-	log.Printf("auth-request: %+v\n", authRequest)
+	// log.Printf("auth-request: %+v\n", authRequest)
 	err = c.conn.Write([]any{
 		"EXTERNAL",
 		[]any{
@@ -228,7 +229,6 @@ func (c *Client) List(path string, rev *int, depth string, fields []string) ([]D
 	if rev != nil {
 		lrev = append(lrev, *rev)
 	}
-	cmd := "list"
 	params := []any{
 		[]byte(path),
 		lrev,
@@ -236,14 +236,14 @@ func (c *Client) List(path string, rev *int, depth string, fields []string) ([]D
 		fields,
 	}
 	err := c.conn.Write([]any{
-		cmd,
+		"list",
 		params,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("client: sending %s: %w", cmd, err)
+		return nil, fmt.Errorf("client: sending \"list\": %w", err)
 	}
 	if err = c.handleAuth(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("client: List: auth: %w", err)
 	}
 
 	var dirents []Dirent
@@ -263,6 +263,58 @@ func (c *Client) List(path string, rev *int, depth string, fields []string) ([]D
 		}
 		dirents = append(dirents, dirent)
 	}
-
+	var item Item
+	err = c.conn.ReadResponse(&item)
+	if err != nil {
+		return nil, fmt.Errorf("client: List: reading final response: %w", err)
+	}
 	return dirents, nil
+}
+
+type PropList struct {
+	Name  string
+	Value string
+}
+
+// GetFile sends a "get-file" command, asking for the contents of a file
+func (c *Client) GetFile(path string, rev *int, wantProps bool, wantContent bool) ([]PropList, []byte, error) {
+	lrev := []int{}
+	if rev != nil {
+		lrev = append(lrev, *rev)
+	}
+	type FileResponse struct {
+		Checksum string
+		Rev      int
+		Props    []PropList
+	}
+	response, err := sendCommand[FileResponse](c, "get-file", []any{
+		[]byte(path),
+		lrev,
+		wantProps,
+		wantContent,
+		"false",
+	})
+
+	if err != nil {
+		return nil, nil, fmt.Errorf("client: GetFile: %w", err)
+	}
+
+	if !wantContent {
+		return response.Props, nil, nil
+	}
+	content := []byte{}
+	for {
+		var b []byte
+		err = c.conn.Read(&b)
+		if err != nil {
+			return nil, nil, fmt.Errorf("client: GetFile: reading content: %w", err)
+		}
+		if len(b) == 0 {
+			break
+		}
+		content = append(content, b...)
+	}
+
+	// CLIENT: ( get-file ( 0: ( 1 ) true false  false ) )
+	return response.Props, content, nil
 }

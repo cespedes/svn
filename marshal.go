@@ -164,7 +164,7 @@ func unmarshal(item Item, v reflect.Value) error {
 			}
 		}
 		if v.Kind() != reflect.String {
-			return fmt.Errorf("cannot unmarshal a Word into kind %q", v.Kind())
+			return fmt.Errorf("cannot unmarshal a Word (%s) into kind %q", item, v.Kind())
 		}
 		v.SetString(item.Text)
 		return nil
@@ -179,7 +179,7 @@ func unmarshal(item Item, v reflect.Value) error {
 				return nil
 			}
 		}
-		return fmt.Errorf("cannot unmarshal a String into kind %q", v.Kind())
+		return fmt.Errorf("cannot unmarshal a String (%s) into kind %q", item, v.Kind())
 	case NumberType:
 		switch v.Kind() {
 		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:

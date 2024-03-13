@@ -35,4 +35,11 @@ func main() {
 		log.Fatal(err)
 	}
 	fmt.Printf("List: %+v\n", dirents)
+
+	props, content, err := c.GetFile("", nil, true, true)
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Printf("GetFile (proplist): %+v\n", props)
+	fmt.Printf("GetFile (content): %q\n", content)
 }
