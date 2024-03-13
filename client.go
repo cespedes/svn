@@ -39,6 +39,8 @@ func (c *Client) Connect(address string) error {
 		return fmt.Errorf("svn connect: parsing %q: %w", address, err)
 	}
 
+	var execArgs []string
+
 	// schema could be one of:
 	// - file
 	// - http
@@ -47,12 +49,30 @@ func (c *Client) Connect(address string) error {
 	// - svn+ssh
 	switch u.Scheme {
 	case "file":
-		u.Scheme = "svn"
+		execArgs = []string{
+			"svnserve",
+			"-t",
+		}
+	case "svn+ssh":
+		host := u.Host
+		if u.User != nil {
+			host = u.User.String() + "@" + host
+		}
+		execArgs = []string{
+			"ssh",
+			"-q",
+			"-o",
+			"ControlMaster=no",
+			"--",
+			host,
+			"svnserve",
+			"-t",
+		}
 	default:
 		return fmt.Errorf("svn: connect to %q: scheme %q not implemented", address, u.Scheme)
 	}
 
-	err = c.exec("svnserve", "-t")
+	err = c.exec(execArgs[0], execArgs[1:]...)
 	if err != nil {
 		return err
 	}

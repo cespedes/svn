@@ -27,8 +27,10 @@ func main() {
 	}
 	fmt.Printf("Stat: %+v\n", stat)
 
-	rev = 1
-	dirents, err := c.List("", &rev, "immediates", []string{"kind", "size", "created-rev", "time", "last-author"})
+	var lrev *int
+	// rev = 1
+	// lrev = &rev
+	dirents, err := c.List("", lrev, "immediates", []string{"kind", "size", "created-rev", "time", "last-author"})
 	if err != nil {
 		log.Fatal(err)
 	}
