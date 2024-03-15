@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -18,36 +19,29 @@ func main() {
 }
 
 func run(args []string, stdout io.Writer) error {
-	if len(args) < 2 {
+	var rev int
+	f := flag.NewFlagSet(args[0], flag.ExitOnError)
+	f.IntVar(&rev, "r", -1, "revision")
+	f.Parse(args[1:])
+	args = f.Args()
+	var lrev *int
+	if rev >= 0 {
+		lrev = &rev
+	}
+	if len(args) == 1 && args[0] == "help" {
+		help(stdout)
+		return nil
+	}
+	if len(args) != 2 {
 		return fmt.Errorf("Type 'go-svn help' for usage.")
 	}
-	switch args[1] {
-	case "help":
-		fmt.Fprintln(stdout, `usage: go-svn <subcommand> [options] [args]
-
-Available subcommands:
-   info
-   cat
-   ls
-
-go-svn is a client for the Subversion protocol.`)
-		return nil
+	switch args[0] {
 	case "info":
-		if len(args) != 3 {
-			return fmt.Errorf("usage: go-svn info <URL>")
-		}
-		return info(args[2], stdout)
+		return info(args[1], lrev, stdout)
 	case "cat":
-		if len(args) != 3 {
-			return fmt.Errorf("usage: go-svn cat <URL>")
-		}
-		return cat(args[2], stdout)
+		return cat(args[1], lrev, stdout)
 	case "ls":
-		if len(args) != 3 {
-			return fmt.Errorf("usage: go-svn ls <URL>")
-		}
-		return ls(args[2], stdout)
-		fmt.Fprintln(stdout, "Command: ls")
+		return ls(args[1], lrev, stdout)
 	default:
 		return fmt.Errorf(`Unknown subcommand: '%s'
 Type 'svn help' for usage.`, args[1])
@@ -55,7 +49,7 @@ Type 'svn help' for usage.`, args[1])
 	return nil
 }
 
-func info(repo string, stdout io.Writer) error {
+func info(repo string, lrev *int, stdout io.Writer) error {
 	c, err := svn.Connect(repo)
 
 	if err != nil {
@@ -81,14 +75,14 @@ func info(repo string, stdout io.Writer) error {
 	return nil
 }
 
-func cat(repo string, stdout io.Writer) error {
+func cat(repo string, lrev *int, stdout io.Writer) error {
 	c, err := svn.Connect(repo)
 
 	if err != nil {
 		return err
 	}
 
-	_, content, err := c.GetFile("", nil, true, true)
+	_, content, err := c.GetFile("", lrev, true, true)
 	if err != nil {
 		return err
 	}
@@ -97,25 +91,23 @@ func cat(repo string, stdout io.Writer) error {
 	return nil
 }
 
-func ls(repo string, stdout io.Writer) error {
+func ls(repo string, lrev *int, stdout io.Writer) error {
 	c, err := svn.Connect(repo)
 
 	if err != nil {
 		return err
 	}
 
-	var lrev *int
-	// rev = 1
-	// lrev = &rev
 	dirents, err := c.List("", lrev, "immediates", []string{"kind", "size", "created-rev", "time", "last-author"})
 	if err != nil {
 		return err
 	}
 	for _, entry := range dirents {
-		path := entry.Path[1:]
-		if path == "" {
-			path = "."
-		}
+		path := entry.Path
+		// path := entry.Path[1:]
+		// if path == "" {
+		// 	path = "."
+		// }
 		size := fmt.Sprint(entry.Size)
 		if entry.Kind == "dir" {
 			size = ""
@@ -126,4 +118,15 @@ func ls(repo string, stdout io.Writer) error {
 	}
 
 	return nil
+}
+
+func help(stdout io.Writer) {
+	fmt.Fprintln(stdout, `usage: go-svn [-r revision] <subcommand> <repo>
+
+Available subcommands:
+   info
+   cat
+   ls
+
+go-svn is a client for the Subversion protocol.`)
 }
