@@ -60,13 +60,17 @@ func info(repo string, lrev *int, stdout io.Writer) error {
 	if err != nil {
 		log.Fatal(err)
 	}
-	fmt.Fprintf(stdout, "Revision: %d\n", rev)
 
 	stat, err := c.Stat("", nil)
 	if err != nil {
 		return err
 	}
 
+	fmt.Fprintf(stdout, "URL: %s\n", repo)
+	// fmt.Fprintf(stdout, "Relative URL: %s\n", XXX)
+	fmt.Fprintf(stdout, "Repository Root: %s\n", c.Info.URL)
+	fmt.Fprintf(stdout, "Repository UUID: %s\n", c.Info.UUID)
+	fmt.Fprintf(stdout, "Revision: %d\n", rev)
 	fmt.Fprintf(stdout, "Node Kind: %s\n", stat.Kind)
 	fmt.Fprintf(stdout, "Last Changed Author: %s\n", stat.LastAuthor)
 	fmt.Fprintf(stdout, "Last Changed Rev: %d\n", stat.CreatedRev)
@@ -102,6 +106,20 @@ func ls(repo string, lrev *int, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
+	maxAuthorLen := 8
+	maxRevLen := 5
+	maxSizeLen := 6
+	for _, entry := range dirents {
+		if len(entry.LastAuthor) > maxAuthorLen {
+			maxAuthorLen = len(entry.LastAuthor)
+		}
+		if len(fmt.Sprint(entry.CreatedRev)) > maxRevLen {
+			maxRevLen = len(fmt.Sprint(entry.CreatedRev))
+		}
+		if entry.Kind == "file" && (len(fmt.Sprint(entry.Size)) > maxSizeLen) {
+			maxSizeLen = len(fmt.Sprint(entry.Size))
+		}
+	}
 	for _, entry := range dirents {
 		path := entry.Path
 		// path := entry.Path[1:]
@@ -114,7 +132,11 @@ func ls(repo string, lrev *int, stdout io.Writer) error {
 			path += "/"
 		}
 		date := entry.CreatedDate[0:10] + " " + entry.CreatedDate[11:19]
-		fmt.Fprintf(stdout, "%7d %-22s %9s %s %s\n", entry.CreatedRev, entry.LastAuthor, size, date, path)
+		fmt.Fprintf(stdout, "%*d %-*s %*s %s %s\n",
+			maxRevLen, entry.CreatedRev,
+			maxAuthorLen, entry.LastAuthor,
+			maxSizeLen, size,
+			date, path)
 	}
 
 	return nil

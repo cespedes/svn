@@ -13,6 +13,11 @@ const SvnClient = "GoSVN/0.0.0"
 type Client struct {
 	conn Conn
 	cmd  *exec.Cmd
+	Info struct {
+		UUID         string
+		URL          string
+		Capabilities []string
+	}
 }
 
 // NewClient returns an empty [Client]
@@ -109,12 +114,7 @@ func (c *Client) Connect(address string) error {
 		return err
 	}
 
-	var reposInfo struct {
-		UUID         string
-		URL          string
-		Capabilities []string
-	}
-	err = c.conn.ReadResponse(&reposInfo)
+	err = c.conn.ReadResponse(&c.Info)
 	if err != nil {
 		return fmt.Errorf("reading repos-info: %w", err)
 	}
