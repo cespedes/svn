@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net/url"
 	"os"
+	"strings"
 
 	"github.com/cespedes/svn"
 )
@@ -120,23 +122,46 @@ func ls(repo string, lrev *int, stdout io.Writer) error {
 			maxSizeLen = len(fmt.Sprint(entry.Size))
 		}
 	}
+	ur, err := url.Parse(c.Info.URL)
+	if err != nil {
+		return fmt.Errorf("parsing repo URL: %w", err) // should not happen
+	}
+	if len(repo) > 0 && repo[len(repo)-1] == '/' {
+		repo = repo[0 : len(repo)-1]
+	}
+	ua, err := url.Parse(repo)
+	if err != nil {
+		return fmt.Errorf("parsing URL: %w", err) // should not happen
+	}
+	// fmt.Printf("repo url path: %s\n", ur.Path)
+	// fmt.Printf("asked path: %s\n", ua.Path)
 	for _, entry := range dirents {
-		path := entry.Path
-		// path := entry.Path[1:]
-		// if path == "" {
-		// 	path = "."
-		// }
+		p := entry.Path
+		localpart := ""
+		if strings.HasPrefix(ua.Path, ur.Path) {
+			localpart = ua.Path[len(ur.Path):]
+		}
+		// fmt.Printf("local part: %s\n", localpart)
+		if strings.HasPrefix(p, localpart) {
+			p = p[len(localpart):]
+		}
+		if len(p) > 0 && p[0] == '/' {
+			p = p[1:]
+		}
+		if p == "" {
+			p = "."
+		}
 		size := fmt.Sprint(entry.Size)
 		if entry.Kind == "dir" {
 			size = ""
-			path += "/"
+			p += "/"
 		}
 		date := entry.CreatedDate[0:10] + " " + entry.CreatedDate[11:19]
 		fmt.Fprintf(stdout, "%*d %-*s %*s %s %s\n",
 			maxRevLen, entry.CreatedRev,
 			maxAuthorLen, entry.LastAuthor,
 			maxSizeLen, size,
-			date, path)
+			date, p)
 	}
 
 	return nil

@@ -8,16 +8,18 @@ import (
 
 const SvnClient = "GoSVN/0.0.0"
 
+type ReposInfo struct {
+	UUID         string
+	URL          string
+	Capabilities []string
+}
+
 // A Client is a SVN client.  Its zero value is not usable; it has to be
 // connected to a server using [Client.Connect].
 type Client struct {
 	conn Conn
 	cmd  *exec.Cmd
-	Info struct {
-		UUID         string
-		URL          string
-		Capabilities []string
-	}
+	Info ReposInfo
 }
 
 // NewClient returns an empty [Client]
