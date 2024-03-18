@@ -8,10 +8,6 @@ import (
 	"github.com/cespedes/svn"
 )
 
-func login(greet svn.Greet) error {
-	return nil
-}
-
 func callback(cmd svn.Command, conn svn.Conn) error {
 	//log.Printf("command: %v\n", command)
 	switch cmd.Name {
@@ -53,7 +49,21 @@ func callback(cmd svn.Command, conn svn.Conn) error {
 }
 
 func main() {
-	err := svn.Serve(os.Stdin, os.Stdout, login, callback)
+	var server svn.Server
+	lastRev := 1000
+	server.GetLatestRev = func() (int, error) {
+		return lastRev, nil
+	}
+	server.Stat = func(path string, rev *uint) (svn.Dirent, error) {
+		return svn.Dirent{
+			Kind:        "dir",
+			CreatedDate: "2024-03-18T14:50:07.758412Z",
+		}, nil
+	}
+	server.CheckPath = func(path string, rev *uint) (string, error) {
+		return "dir", nil
+	}
+	err := server.Serve(os.Stdin, os.Stdout)
 	if err != nil {
 		log.Fatal(err)
 	}

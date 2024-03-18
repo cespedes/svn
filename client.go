@@ -8,12 +8,6 @@ import (
 
 const SvnClient = "GoSVN/0.0.0"
 
-type ReposInfo struct {
-	UUID         string
-	URL          string
-	Capabilities []string
-}
-
 // A Client is a SVN client.  Its zero value is not usable; it has to be
 // connected to a server using [Client.Connect].
 type Client struct {
@@ -194,15 +188,6 @@ func (c *Client) GetLatestRev() (int, error) {
 	return sendCommand[int](c, "get-latest-rev", []any{})
 }
 
-type Stat struct {
-	Kind        string
-	Size        uint64
-	HasProps    bool
-	CreatedRev  uint
-	CreatedDate string
-	LastAuthor  string
-}
-
 // Stat sends a "stat" command, asking for the status of a path in a revision.
 // "rev" can be nil or a pointer to an integer.
 func (c *Client) Stat(path string, rev *int) (Stat, error) {
@@ -213,16 +198,6 @@ func (c *Client) Stat(path string, rev *int) (Stat, error) {
 	input := []any{[]byte(path), lrev}
 
 	return sendCommand[Stat](c, "stat", input)
-}
-
-type Dirent struct {
-	Path        string
-	Kind        string
-	Size        uint64
-	HasProps    bool
-	CreatedRev  uint
-	CreatedDate string
-	LastAuthor  string
 }
 
 // List sends a "list" command, asking for list of files
@@ -271,11 +246,6 @@ func (c *Client) List(path string, rev *int, depth string, fields []string) ([]D
 		return nil, fmt.Errorf("client: List: reading final response: %w", err)
 	}
 	return dirents, nil
-}
-
-type PropList struct {
-	Name  string
-	Value string
 }
 
 // GetFile sends a "get-file" command, asking for the contents of a file

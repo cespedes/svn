@@ -31,17 +31,31 @@ func (c *Conn) WriteSuccess(what any) error {
 	})
 }
 
-func (c *Conn) WriteFailure(what error) error {
+func ToError(err error) Error {
+	if Err, ok := err.(Error); ok {
+		return Err
+	}
+	return Error{Message: err.Error()}
+}
+
+func (c *Conn) WriteFailure(err error) error {
+	var msg struct {
+		AprErr  int
+		Message []byte
+		File    []byte
+		Line    int
+	}
+	msg.AprErr = 21005
+	msg.Message = []byte(err.Error())
+	if Err, ok := err.(Error); ok {
+		msg.AprErr = Err.AprErr
+		msg.Message = []byte(Err.Message)
+		msg.File = []byte(Err.File)
+		msg.Line = Err.Line
+	}
 	return c.Write([]any{
 		"failure",
-		[]any{
-			[]any{
-				21005,
-				[]byte(what.Error()),
-				[]byte{},
-				0,
-			},
-		},
+		[]any{msg},
 	})
 }
 

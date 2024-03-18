@@ -16,21 +16,6 @@ type Response struct {
 	Params Item
 }
 
-type Error struct {
-	AprErr  int
-	Message string
-	File    string
-	Line    int
-}
-
-func (e Error) Error() string {
-	ret := fmt.Sprintf("%d %s", e.AprErr, e.Message)
-	if e.File != "" {
-		ret += fmt.Sprintf(" (%s line %d)", e.File, e.Line)
-	}
-	return ret
-}
-
 // ParseResponse expects an item following the prototype of "command response"
 // and returns the list of params if the type is "success".
 // It returns error otherwise.
