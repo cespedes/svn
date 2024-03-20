@@ -14,17 +14,6 @@ type Server struct {
 	CheckPath    func(path string, rev *uint) (string, error)
 }
 
-//		Version      int
-//		Capabilities []string
-//		URL          string
-//		RAClient     string
-//		Client       []string
-
-type Command struct {
-	Name   string
-	Params []Item
-}
-
 // Serve sends and receives SVN messages against a client,
 // issuing calls to the respective functions when a message
 // is received.
@@ -127,7 +116,10 @@ func (s *Server) Serve(r io.Reader, w io.Writer) error {
 
 	for {
 		var item Item
-		var command Command
+		var command struct {
+			Name   string
+			Params []Item
+		}
 		err = conn.Read(&item)
 		if err != nil {
 			return err

@@ -15,7 +15,7 @@ import (
 func main() {
 	err := run(os.Args, os.Stdout)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, err.Error())
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err.Error())
 		os.Exit(1)
 	}
 }
@@ -35,7 +35,7 @@ func run(args []string, stdout io.Writer) error {
 		return nil
 	}
 	if len(args) != 2 {
-		return fmt.Errorf("Type 'go-svn help' for usage.")
+		return fmt.Errorf("type 'go-svn help' for usage")
 	}
 	switch args[0] {
 	case "info":
@@ -45,8 +45,8 @@ func run(args []string, stdout io.Writer) error {
 	case "ls":
 		return ls(args[1], lrev, stdout)
 	default:
-		return fmt.Errorf(`Unknown subcommand: '%s'
-Type 'svn help' for usage.`, args[1])
+		return fmt.Errorf(`unknown subcommand: '%s'
+Type 'svn help' for usage`, args[0])
 	}
 	return nil
 }
@@ -142,9 +142,7 @@ func ls(repo string, lrev *int, stdout io.Writer) error {
 			localpart = ua.Path[len(ur.Path):]
 		}
 		// fmt.Printf("local part: %s\n", localpart)
-		if strings.HasPrefix(p, localpart) {
-			p = p[len(localpart):]
-		}
+		p = strings.TrimPrefix(p, localpart)
 		if len(p) > 0 && p[0] == '/' {
 			p = p[1:]
 		}
