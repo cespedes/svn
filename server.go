@@ -12,6 +12,7 @@ type Server struct {
 	GetLatestRev func() (int, error)
 	Stat         func(path string, rev *uint) (Dirent, error)
 	CheckPath    func(path string, rev *uint) (string, error)
+	List         func(path string, rev *uint, depth string, fields []string, pattern []string) ([]Dirent, error)
 }
 
 // Serve sends and receives SVN messages against a client,
@@ -156,8 +157,9 @@ func (s *Server) Serve(r io.Reader, w io.Writer) error {
 				continue
 			}
 			var rev *uint
-			if len(command.Params) > 1 && command.Params[1].Type == NumberType {
-				rev = &command.Params[1].Number
+			if len(command.Params) > 1 && command.Params[1].Type == ListType &&
+				len(command.Params[1].List) > 0 && command.Params[1].List[0].Type == NumberType {
+				rev = &command.Params[1].List[0].Number
 			}
 			entry, err := s.Stat(command.Params[0].Text, rev)
 			if err != nil {
@@ -173,6 +175,67 @@ func (s *Server) Serve(r io.Reader, w io.Writer) error {
 				[]any{[]byte(entry.CreatedDate)},
 				[]any{[]byte(entry.LastAuthor)},
 			}}})
+		case "list":
+			if s.List == nil {
+				replyUnimplemented(conn, command.Name)
+				continue
+			}
+			neterr := Error{
+				AprErr:  210004,
+				Message: "Malformed network data",
+			}
+			if len(command.Params) < 4 {
+				conn.WriteFailure(neterr)
+				continue
+			}
+			var args struct {
+				Path    string
+				Rev     *uint
+				Depth   string
+				Fields  []string
+				Pattern []string
+			}
+			if err = Unmarshal(command.Params[0], &args.Path); err != nil {
+				conn.WriteFailure(neterr)
+				continue
+			}
+			if err = Unmarshal(command.Params[1], &args.Rev); err != nil {
+				conn.WriteFailure(fmt.Errorf("unmarshaling %s: %w", command.Params[1], err))
+				continue
+			}
+			if err = Unmarshal(command.Params[2], &args.Depth); err != nil {
+				conn.WriteFailure(neterr)
+				continue
+			}
+			if err = Unmarshal(command.Params[3], &args.Fields); err != nil {
+				conn.WriteFailure(neterr)
+				continue
+			}
+			if len(command.Params) > 4 {
+				if err = Unmarshal(command.Params[4], &args.Pattern); err != nil {
+					conn.WriteFailure(neterr)
+					continue
+				}
+			}
+			dirents, err := s.List(args.Path, args.Rev, args.Depth, args.Fields, args.Pattern)
+			if err != nil {
+				conn.WriteFailure(err)
+				continue
+			}
+			conn.WriteSuccess([]any{[]any{}, []byte{}})
+			for _, d := range dirents {
+				conn.Write([]any{
+					[]byte(d.Path),
+					d.Kind,
+					[]any{d.Size},
+					[]any{d.HasProps},
+					[]any{d.CreatedRev},
+					[]any{[]byte(d.CreatedDate)},
+					[]any{[]byte(d.LastAuthor)},
+				})
+			}
+			conn.Write("done")
+			conn.WriteSuccess([]any{})
 		case "check-path":
 			if s.CheckPath == nil {
 				replyUnimplemented(conn, command.Name)

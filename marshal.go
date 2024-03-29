@@ -147,6 +147,12 @@ func Unmarshal(item Item, v any) error {
 }
 
 func unmarshal(item Item, v reflect.Value) error {
+	if v.Kind() == reflect.Pointer {
+		if v.IsNil() {
+			v.Set(reflect.New(v.Type().Elem()))
+		}
+		v = v.Elem()
+	}
 	if v.Type() == reflect.TypeOf(item) {
 		v.Set(reflect.ValueOf(item))
 		return nil
