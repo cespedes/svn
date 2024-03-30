@@ -2,6 +2,9 @@ package svn
 
 import "fmt"
 
+// Error is the reprensentation of a "failure"
+// command response.  It also implements the
+// error interface.
 type Error struct {
 	AprErr  int
 	Message string `svn:",xxx"`

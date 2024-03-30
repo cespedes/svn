@@ -21,7 +21,7 @@ type Server struct {
 //
 // Serve returns if there is an error, or after the end of the connection.
 func (s *Server) Serve(r io.Reader, w io.Writer) error {
-	conn := Conn{
+	conn := conn{
 		r: r,
 		w: w,
 	}
@@ -270,7 +270,7 @@ func (s *Server) Serve(r io.Reader, w io.Writer) error {
 	}
 }
 
-func replyUnimplemented(conn Conn, cmd string) {
+func replyUnimplemented(conn conn, cmd string) {
 	conn.WriteFailure(Error{
 		AprErr:  210001,
 		Message: fmt.Sprintf("Command '%s' unimplemented", cmd),

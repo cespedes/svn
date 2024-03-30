@@ -8,9 +8,3 @@ in Go.
 
 This is a work in progress, and it is in a very early stage:
 do not expect this package to be working yet.
-
-# Documentation
-
-Please see the
-[Go reference](https://pkg.go.dev/github.com/cespedes/svn)
-for documentation.

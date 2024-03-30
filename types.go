@@ -20,7 +20,7 @@ type Stat struct {
 }
 
 // Dirent is the response for the "list" command
-// (asking for list of files)
+// (asking for list of files).
 type Dirent struct {
 	Path        string
 	Kind        string
@@ -31,8 +31,8 @@ type Dirent struct {
 	LastAuthor  string
 }
 
-// PorpList is one of the responses for the "get-file" command
-// (asking for the contents of a file)
+// PropList is one of the responses for the "get-file" command
+// (asking for the contents of a file).
 type PropList struct {
 	Name  string
 	Value string

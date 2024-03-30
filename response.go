@@ -4,23 +4,14 @@ import (
 	"fmt"
 )
 
-type ResponseType int
-
-const (
-	ResponseSuccess ItemType = iota
-	ResponseFailure
-)
-
-type Response struct {
-	Type   string
-	Params Item
-}
-
 // ParseResponse expects an item following the prototype of "command response"
 // and returns the list of params if the type is "success".
 // It returns error otherwise.
 func ParseResponse(i Item) (Item, error) {
-	var resp Response
+	var resp struct {
+		Type   string
+		Params Item
+	}
 	err := Unmarshal(i, &resp)
 	if err != nil {
 		return Item{}, err
@@ -43,13 +34,4 @@ func ParseResponse(i Item) (Item, error) {
 	default:
 		return Item{}, fmt.Errorf("syntax error: response must be `success` or `failure`")
 	}
-}
-
-// ParseError parses a "failure" command response and returns an Error
-// if it can be parsed.
-func ParseError(response error) (Error, error) {
-	if e, ok := response.(Error); ok {
-		return e, nil
-	}
-	return Error{}, response
 }

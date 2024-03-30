@@ -147,12 +147,6 @@ func Unmarshal(item Item, v any) error {
 }
 
 func unmarshal(item Item, v reflect.Value) error {
-	if v.Kind() == reflect.Pointer {
-		if v.IsNil() {
-			v.Set(reflect.New(v.Type().Elem()))
-		}
-		v = v.Elem()
-	}
 	if v.Type() == reflect.TypeOf(item) {
 		v.Set(reflect.ValueOf(item))
 		return nil
@@ -160,6 +154,13 @@ func unmarshal(item Item, v reflect.Value) error {
 
 	switch item.Type {
 	case WordType:
+		// If destination is a pointer, get the address it points to
+		for v.Kind() == reflect.Pointer {
+			if v.IsNil() {
+				v.Set(reflect.New(v.Type().Elem()))
+			}
+			v = v.Elem()
+		}
 		if v.Kind() == reflect.Bool {
 			if item.Text == "true" {
 				v.SetBool(true)
@@ -175,6 +176,13 @@ func unmarshal(item Item, v reflect.Value) error {
 		v.SetString(item.Text)
 		return nil
 	case StringType:
+		// If destination is a pointer, get the address it points to
+		for v.Kind() == reflect.Pointer {
+			if v.IsNil() {
+				v.Set(reflect.New(v.Type().Elem()))
+			}
+			v = v.Elem()
+		}
 		switch v.Kind() {
 		case reflect.String:
 			v.SetString(item.Text)
@@ -187,6 +195,13 @@ func unmarshal(item Item, v reflect.Value) error {
 		}
 		return fmt.Errorf("cannot unmarshal a String (%s) into kind %q", item, v.Kind())
 	case NumberType:
+		// If destination is a pointer, get the address it points to
+		for v.Kind() == reflect.Pointer {
+			if v.IsNil() {
+				v.Set(reflect.New(v.Type().Elem()))
+			}
+			v = v.Elem()
+		}
 		switch v.Kind() {
 		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
 			v.SetInt(int64(item.Number))
@@ -201,6 +216,17 @@ func unmarshal(item Item, v reflect.Value) error {
 		// TODO: not sure if this will always be correct
 		if len(item.List) == 1 && item.List[0].Type == ListType {
 			return unmarshal(item.List[0], v)
+		}
+		// zero-size lists: nothing to do
+		if len(item.List) == 0 {
+			return nil
+		}
+		// If destination is a pointer, get the address it points to
+		for v.Kind() == reflect.Pointer {
+			if v.IsNil() {
+				v.Set(reflect.New(v.Type().Elem()))
+			}
+			v = v.Elem()
 		}
 		switch v.Kind() {
 		case reflect.Struct:
