@@ -1,6 +1,7 @@
 package svn
 
 import (
+	"crypto/md5"
 	"fmt"
 	"io"
 )
@@ -13,6 +14,7 @@ type Server struct {
 	Stat         func(path string, rev *uint) (Dirent, error)
 	CheckPath    func(path string, rev *uint) (string, error)
 	List         func(path string, rev *uint, depth string, fields []string, pattern []string) ([]Dirent, error)
+	GetFile      func(path string, rev *uint, wantProps bool, wantContents bool) (uint, []PropList, []byte, error)
 }
 
 // Serve sends and receives SVN messages against a client,
@@ -119,7 +121,7 @@ func (s *Server) Serve(r io.Reader, w io.Writer) error {
 		var item Item
 		var command struct {
 			Name   string
-			Params []Item
+			Params Item
 		}
 		err = conn.Read(&item)
 		if err != nil {
@@ -128,6 +130,10 @@ func (s *Server) Serve(r io.Reader, w io.Writer) error {
 		err = Unmarshal(item, &command)
 		if err != nil {
 			return err
+		}
+		neterr := Error{
+			AprErr:  210004,
+			Message: "Malformed network data",
 		}
 		// log.Printf("server received command %q %v\n", command.Name, command.Params)
 		switch command.Name {
@@ -145,23 +151,20 @@ func (s *Server) Serve(r io.Reader, w io.Writer) error {
 			conn.WriteSuccess([]any{[]any{}, []byte{}})
 			conn.WriteSuccess([]any{rev})
 		case "stat":
+			// params: ( path:string [ rev:number ] )
 			if s.Stat == nil {
 				replyUnimplemented(conn, command.Name)
 				continue
 			}
-			if len(command.Params) < 1 || command.Params[0].Type != StringType {
-				conn.WriteFailure(Error{
-					AprErr:  210004,
-					Message: "Malformed network data",
-				})
+			var args struct {
+				Path string
+				Rev  *uint
+			}
+			if err = Unmarshal(command.Params, &args); err != nil {
+				conn.WriteFailure(neterr)
 				continue
 			}
-			var rev *uint
-			if len(command.Params) > 1 && command.Params[1].Type == ListType &&
-				len(command.Params[1].List) > 0 && command.Params[1].List[0].Type == NumberType {
-				rev = &command.Params[1].List[0].Number
-			}
-			entry, err := s.Stat(command.Params[0].Text, rev)
+			entry, err := s.Stat(args.Path, args.Rev)
 			if err != nil {
 				conn.WriteFailure(err)
 				continue
@@ -176,16 +179,9 @@ func (s *Server) Serve(r io.Reader, w io.Writer) error {
 				[]any{[]byte(entry.LastAuthor)},
 			}}})
 		case "list":
+			// params: ( path:string [ rev:number ] depth:word ( field:dirent-field ... ) ? ( pattern:string ... ) )
 			if s.List == nil {
 				replyUnimplemented(conn, command.Name)
-				continue
-			}
-			neterr := Error{
-				AprErr:  210004,
-				Message: "Malformed network data",
-			}
-			if len(command.Params) < 4 {
-				conn.WriteFailure(neterr)
 				continue
 			}
 			var args struct {
@@ -195,27 +191,9 @@ func (s *Server) Serve(r io.Reader, w io.Writer) error {
 				Fields  []string
 				Pattern []string
 			}
-			if err = Unmarshal(command.Params[0], &args.Path); err != nil {
+			if err = Unmarshal(command.Params, &args); err != nil {
 				conn.WriteFailure(neterr)
 				continue
-			}
-			if err = Unmarshal(command.Params[1], &args.Rev); err != nil {
-				conn.WriteFailure(fmt.Errorf("unmarshaling %s: %w", command.Params[1], err))
-				continue
-			}
-			if err = Unmarshal(command.Params[2], &args.Depth); err != nil {
-				conn.WriteFailure(neterr)
-				continue
-			}
-			if err = Unmarshal(command.Params[3], &args.Fields); err != nil {
-				conn.WriteFailure(neterr)
-				continue
-			}
-			if len(command.Params) > 4 {
-				if err = Unmarshal(command.Params[4], &args.Pattern); err != nil {
-					conn.WriteFailure(neterr)
-					continue
-				}
 			}
 			dirents, err := s.List(args.Path, args.Rev, args.Depth, args.Fields, args.Pattern)
 			if err != nil {
@@ -237,28 +215,55 @@ func (s *Server) Serve(r io.Reader, w io.Writer) error {
 			conn.Write("done")
 			conn.WriteSuccess([]any{})
 		case "check-path":
+			// params: ( path:string [ rev:number ] )
 			if s.CheckPath == nil {
 				replyUnimplemented(conn, command.Name)
 				continue
 			}
-			if len(command.Params) < 1 || command.Params[0].Type != StringType {
-				conn.WriteFailure(Error{
-					AprErr:  210004,
-					Message: "Malformed network data",
-				})
+			var args struct {
+				Path string
+				Rev  *uint
+			}
+			if err = Unmarshal(command.Params, &args); err != nil {
+				conn.WriteFailure(neterr)
 				continue
 			}
-			var rev *uint
-			if len(command.Params) > 1 && command.Params[1].Type == NumberType {
-				rev = &command.Params[1].Number
-			}
-			kind, err := s.CheckPath(command.Params[0].Text, rev)
+			kind, err := s.CheckPath(args.Path, args.Rev)
 			if err != nil {
 				conn.WriteFailure(err)
 				continue
 			}
 			conn.WriteSuccess([]any{[]any{}, []byte{}})
 			conn.WriteSuccess([]any{kind})
+		case "get-file":
+			// params: ( path:string [ rev:number ] want-props:bool want-contents:bool ? want-iprops:bool )
+			if s.GetFile == nil {
+				replyUnimplemented(conn, command.Name)
+				continue
+			}
+			var args struct {
+				Path         string
+				Rev          *uint
+				WantProps    bool
+				WantContents bool
+			}
+			if err = Unmarshal(command.Params, &args); err != nil {
+				conn.WriteFailure(neterr)
+				continue
+			}
+			rev, proplist, contents, err := s.GetFile(args.Path, args.Rev, args.WantProps, args.WantContents)
+			if err != nil {
+				conn.WriteFailure(err)
+				continue
+			}
+			checksum := []byte(fmt.Sprintf("%x", md5.Sum(contents)))
+			conn.WriteSuccess([]any{[]any{}, []byte{}})
+			conn.WriteSuccess([]any{[]any{checksum}, rev, proplist})
+			if args.WantContents {
+				conn.Write(contents)
+				conn.Write([]byte{})
+				conn.WriteSuccess([]any{})
+			}
 		default:
 			conn.WriteFailure(Error{
 				AprErr:  210001,

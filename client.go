@@ -132,7 +132,7 @@ func (c *Client) handleAuth() error {
 	}
 	err := c.conn.ReadResponse(&authRequest)
 	if err != nil {
-		return fmt.Errorf("client: reading auth-request: %w", err)
+		return fmt.Errorf("reading auth-request: %w", err)
 	}
 	if len(authRequest.Mechanisms) == 0 {
 		return nil
@@ -144,12 +144,12 @@ func (c *Client) handleAuth() error {
 		},
 	})
 	if err != nil {
-		return fmt.Errorf("client: sending auth response: %w", err)
+		return fmt.Errorf("sending auth response: %w", err)
 	}
 	var item Item
 	err = c.conn.ReadResponse(&item)
 	if err != nil {
-		return fmt.Errorf("client: reading auth response: %w", err)
+		return fmt.Errorf("reading auth response: %w", err)
 	}
 	return nil
 }
@@ -258,7 +258,7 @@ func (c *Client) GetFile(path string, rev *int, wantProps bool, wantContent bool
 	})
 
 	if err != nil {
-		return nil, nil, fmt.Errorf("client: GetFile: %w", err)
+		return nil, nil, fmt.Errorf("GetFile: %w", err)
 	}
 
 	if !wantContent {
@@ -269,7 +269,7 @@ func (c *Client) GetFile(path string, rev *int, wantProps bool, wantContent bool
 		var b []byte
 		err = c.conn.Read(&b)
 		if err != nil {
-			return nil, nil, fmt.Errorf("client: GetFile: reading content: %w", err)
+			return nil, nil, fmt.Errorf("GetFile: reading content: %w", err)
 		}
 		if len(b) == 0 {
 			break
