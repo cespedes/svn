@@ -37,3 +37,15 @@ type PropList struct {
 	Name  string
 	Value string
 }
+
+// LogEntry is every one of the responses for the "log" command.
+type LogEntry struct {
+	Changed []struct {
+		Path string
+		Mode string
+	}
+	Rev     uint
+	Author  string
+	Date    string
+	Message string
+}

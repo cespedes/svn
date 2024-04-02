@@ -7,4 +7,4 @@ This package provides client and server implementations of the
 in Go.
 
 This is a work in progress, and it is in a very early stage:
-do not expect this package to be working yet.
+some operations already work, but not completely.

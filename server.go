@@ -15,6 +15,7 @@ type Server struct {
 	CheckPath    func(path string, rev *uint) (string, error)
 	List         func(path string, rev *uint, depth string, fields []string, pattern []string) ([]Dirent, error)
 	GetFile      func(path string, rev *uint, wantProps bool, wantContents bool) (uint, []PropList, []byte, error)
+	Log          func(paths []string, startRev uint, endRev uint) ([]LogEntry, error)
 }
 
 // Serve sends and receives SVN messages against a client,
@@ -264,6 +265,45 @@ func (s *Server) Serve(r io.Reader, w io.Writer) error {
 				conn.Write([]byte{})
 				conn.WriteSuccess([]any{})
 			}
+		case "log":
+			// params: ( ( target-path:string ... ) [ start-rev:number ] [ end-rev:number ] changed-paths:bool strict-node:bool ? limit:number ? include-merged-revisions:bool all-revprops | revprops ( revprop:string ... ) )
+			if s.Log == nil {
+				replyUnimplemented(conn, command.Name)
+				continue
+			}
+			var args struct {
+				Paths                  []string
+				StartRev               uint
+				EndRev                 uint
+				ChangedPaths           bool
+				StrictNode             bool
+				Limit                  int
+				IncludeMergedRevisions bool
+				RevpropsType           string
+				Revprops               []string
+			}
+			if err = Unmarshal(command.Params, &args); err != nil {
+				conn.WriteFailure(neterr)
+				continue
+			}
+			logEntries, err := s.Log(args.Paths, args.StartRev, args.EndRev)
+			if err != nil {
+				conn.WriteFailure(err)
+				continue
+			}
+			conn.WriteSuccess([]any{[]any{}, []byte{}})
+			for _, l := range logEntries {
+				// ( ( ) 7573 ( 3:noc ) ( 27:2024-04-02T13:37:34.350221Z ) ( 43:New open position: 2024-04-phd-visiting-apt ) false false 0 ( ) false )
+				conn.Write([]any{
+					l.Changed,
+					l.Rev,
+					[]any{[]byte(l.Author)},
+					[]any{[]byte(l.Date)},
+					[]any{[]byte(l.Message)},
+				})
+			}
+			conn.Write("done")
+			conn.WriteSuccess([]any{})
 		default:
 			conn.WriteFailure(Error{
 				AprErr:  210001,
