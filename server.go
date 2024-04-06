@@ -16,6 +16,7 @@ type Server struct {
 	List         func(path string, rev *uint, depth string, fields []string, pattern []string) ([]Dirent, error)
 	GetFile      func(path string, rev *uint, wantProps bool, wantContents bool) (uint, []PropList, []byte, error)
 	Log          func(paths []string, startRev uint, endRev uint) ([]LogEntry, error)
+	Update       func(rev *uint, target string, recurse bool)
 }
 
 // Serve sends and receives SVN messages against a client,
@@ -304,6 +305,22 @@ func (s *Server) Serve(r io.Reader, w io.Writer) error {
 			}
 			conn.Write("done")
 			conn.WriteSuccess([]any{})
+		case "update":
+			if s.Update == nil {
+				replyUnimplemented(conn, command.Name)
+				continue
+			}
+			var args struct {
+				Rev     *uint
+				Target  string
+				Recurse bool
+			}
+			if err = Unmarshal(command.Params, &args); err != nil {
+				conn.WriteFailure(neterr)
+				continue
+			}
+			// empty auth-request:
+			conn.WriteSuccess([]any{[]any{}, []byte{}})
 		default:
 			conn.WriteFailure(Error{
 				AprErr:  210001,
