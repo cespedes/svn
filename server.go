@@ -17,6 +17,7 @@ type Server struct {
 	GetFile      func(path string, rev *uint, wantProps bool, wantContents bool) (uint, []PropList, []byte, error)
 	Log          func(paths []string, startRev uint, endRev uint) ([]LogEntry, error)
 	Update       func(rev *uint, target string, recurse bool)
+	SetPath      func(path string, rev uint, startEmpty bool)
 }
 
 // Serve sends and receives SVN messages against a client,
@@ -321,6 +322,21 @@ func (s *Server) Serve(r io.Reader, w io.Writer) error {
 			}
 			// empty auth-request:
 			conn.WriteSuccess([]any{[]any{}, []byte{}})
+		case "set-path": // From the Report Command Set
+			if s.SetPath == nil {
+				replyUnimplemented(conn, command.Name)
+				continue
+			}
+			var args struct {
+				Path       string
+				Rev        uint
+				StartEmpty bool
+			}
+			if err = Unmarshal(command.Params, &args); err != nil {
+				conn.WriteFailure(neterr)
+				continue
+			}
+			// no response in set-path
 		default:
 			conn.WriteFailure(Error{
 				AprErr:  210001,
