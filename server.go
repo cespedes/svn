@@ -18,6 +18,7 @@ type Server struct {
 	Log          func(paths []string, startRev uint, endRev uint) ([]LogEntry, error)
 	Update       func(rev *uint, target string, recurse bool)
 	SetPath      func(path string, rev uint, startEmpty bool)
+	FinishReport func()
 }
 
 // Serve sends and receives SVN messages against a client,
@@ -337,6 +338,13 @@ func (s *Server) Serve(r io.Reader, w io.Writer) error {
 				continue
 			}
 			// no response in set-path
+		case "finish-report": // From the Report Command Set
+			if s.FinishReport == nil {
+				replyUnimplemented(conn, command.Name)
+				continue
+			}
+			// no response?
+			conn.WriteSuccess([]any{[]any{}, []byte{}})
 		default:
 			conn.WriteFailure(Error{
 				AprErr:  210001,
