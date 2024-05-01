@@ -15,10 +15,10 @@ type Server struct {
 	CheckPath    func(path string, rev *uint) (string, error)
 	List         func(path string, rev *uint, depth string, fields []string, pattern []string) ([]Dirent, error)
 	GetFile      func(path string, rev *uint, wantProps bool, wantContents bool) (uint, []PropList, []byte, error)
-	Log          func(paths []string, startRev uint, endRev uint) ([]LogEntry, error)
+	Log          func(paths []string, startRev uint, endRev uint, changedPaths bool) ([]LogEntry, error)
 	Update       func(rev *uint, target string, recurse bool)
 	SetPath      func(path string, rev uint, startEmpty bool)
-	FinishReport func()
+	FinishReport func() ([]Item, error)
 }
 
 // Serve sends and receives SVN messages against a client,
@@ -289,7 +289,7 @@ func (s *Server) Serve(r io.Reader, w io.Writer) error {
 				conn.WriteFailure(neterr)
 				continue
 			}
-			logEntries, err := s.Log(args.Paths, args.StartRev, args.EndRev)
+			logEntries, err := s.Log(args.Paths, args.StartRev, args.EndRev, args.ChangedPaths)
 			if err != nil {
 				conn.WriteFailure(err)
 				continue
@@ -345,6 +345,23 @@ func (s *Server) Serve(r io.Reader, w io.Writer) error {
 			}
 			// no response?
 			conn.WriteSuccess([]any{[]any{}, []byte{}})
+			items, err := s.FinishReport()
+			if err != nil {
+				conn.Write([]any{"abort-edit", []any{}})
+				continue
+			}
+			for _, i := range items {
+				conn.Write(i)
+			}
+			conn.Write([]any{"close-edit", []any{}})
+			err = conn.ReadResponse(&item)
+			if err != nil {
+				return err
+			}
+			err = conn.WriteSuccess([]any{})
+			if err != nil {
+				return err
+			}
 		default:
 			conn.WriteFailure(Error{
 				AprErr:  210001,
