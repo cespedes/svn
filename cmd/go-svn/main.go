@@ -39,11 +39,13 @@ func run(args []string, stdout io.Writer) error {
 	}
 	switch args[0] {
 	case "info":
-		return info(args[1], lrev, stdout)
+		return svnInfo(args[1], lrev, stdout)
 	case "cat":
-		return cat(args[1], lrev, stdout)
+		return svnCat(args[1], lrev, stdout)
 	case "ls":
-		return ls(args[1], lrev, stdout)
+		return svnLs(args[1], lrev, stdout)
+	case "log":
+		return svnLog(args[1], lrev, stdout)
 	default:
 		return fmt.Errorf(`unknown subcommand: '%s'
 Type 'svn help' for usage`, args[0])
@@ -51,7 +53,7 @@ Type 'svn help' for usage`, args[0])
 	return nil
 }
 
-func info(repo string, lrev *int, stdout io.Writer) error {
+func svnInfo(repo string, lrev *int, stdout io.Writer) error {
 	c, err := svn.Connect(repo)
 
 	if err != nil {
@@ -81,7 +83,7 @@ func info(repo string, lrev *int, stdout io.Writer) error {
 	return nil
 }
 
-func cat(repo string, lrev *int, stdout io.Writer) error {
+func svnCat(repo string, lrev *int, stdout io.Writer) error {
 	c, err := svn.Connect(repo)
 
 	if err != nil {
@@ -97,7 +99,7 @@ func cat(repo string, lrev *int, stdout io.Writer) error {
 	return nil
 }
 
-func ls(repo string, lrev *int, stdout io.Writer) error {
+func svnLs(repo string, lrev *int, stdout io.Writer) error {
 	c, err := svn.Connect(repo)
 
 	if err != nil {
@@ -165,6 +167,36 @@ func ls(repo string, lrev *int, stdout io.Writer) error {
 	return nil
 }
 
+func svnLog(repo string, lrev *int, stdout io.Writer) error {
+	c, err := svn.Connect(repo)
+
+	if err != nil {
+		return err
+	}
+
+	logs, err := c.Log(nil, lrev, nil, false)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	for _, l := range logs {
+		fmt.Fprintln(stdout, "------------------------------------------------------------------------")
+		if l.Rev == 0 {
+			break
+		}
+		slines := "1 line"
+		lines := strings.Count(l.Message, "\n")
+		if lines > 0 {
+			slines = fmt.Sprintf("%d lines", lines+1)
+		}
+		fmt.Fprintf(stdout, "r%d | %s | %s | %s\n", l.Rev, l.Author, l.Date, slines)
+		fmt.Fprintln(stdout)
+		fmt.Fprintln(stdout, l.Message)
+	}
+
+	return nil
+}
+
 func help(stdout io.Writer) {
 	fmt.Fprintln(stdout, `usage: go-svn [-r revision] <subcommand> <repo>
 
@@ -172,6 +204,7 @@ Available subcommands:
    info
    cat
    ls
+   log
 
 go-svn is a client for the Subversion protocol.`)
 }

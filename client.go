@@ -238,6 +238,12 @@ func (c *Client) List(path string, rev *int, depth string, fields []string) ([]D
 	return dirents, nil
 }
 
+//  get-file
+//    params:   ( path:string [ rev:number ] want-props:bool want-contents:bool
+//                ? want-iprops:bool )
+//    response: ( [ checksum:string ] rev:number props:proplist
+//                [ inherited-props:iproplist ] )
+
 // GetFile sends a "get-file" command, asking for the contents of a file.
 func (c *Client) GetFile(path string, rev *int, wantProps bool, wantContent bool) ([]PropList, []byte, error) {
 	lrev := []int{}
@@ -278,4 +284,77 @@ func (c *Client) GetFile(path string, rev *int, wantProps bool, wantContent bool
 	}
 
 	return response.Props, content, nil
+}
+
+//  log
+//    params:   ( ( target-path:string ... ) [ start-rev:number ]
+//                [ end-rev:number ] changed-paths:bool strict-node:bool
+//                ? limit:number
+//                ? include-merged-revisions:bool
+//                all-revprops | revprops ( revprop:string ... ) )
+
+// write(4, "( log ( ( 0: ) ( 22261 ) ( 0 ) false false 0 false revprops ( 10:svn:author 8:svn:date 7:svn:log ) ) ) ", 103) = 103
+// Log sends a "log" command, asking for log entries.
+func (c *Client) Log(paths []string, startRev *int, endRev *int, changedPaths bool) ([]LogEntry, error) {
+	srev := []int{}
+	if startRev != nil {
+		srev = append(srev, *startRev)
+	}
+	erev := []int{}
+	if endRev == nil {
+		erev = append(erev, 0)
+	} else {
+		erev = append(erev, *endRev)
+	}
+	if len(paths) == 0 {
+		paths = append(paths, "")
+	}
+	var bpaths [][]byte
+	for _, p := range paths {
+		bpaths = append(bpaths, []byte(p))
+	}
+
+	err := c.conn.Write([]any{
+		"log", []any{
+			bpaths,
+			srev,
+			erev,
+			changedPaths,
+			false, 0, false, "revprops", []any{
+				[]byte("svn:author"),
+				[]byte("svn:date"),
+				[]byte("svn:log"),
+			},
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("client: sending \"log\": %w", err)
+	}
+	if err = c.handleAuth(); err != nil {
+		return nil, fmt.Errorf("client: Log: auth: %w", err)
+	}
+
+	var entries []LogEntry
+	for {
+		var item Item
+		err = c.conn.Read(&item)
+		if err != nil {
+			return nil, fmt.Errorf("client: Log: reading log entriy: %w", err)
+		}
+		if item.Type == WordType && item.Text == "done" {
+			break
+		}
+		var entry LogEntry
+		err = Unmarshal(item, &entry)
+		if err != nil {
+			return nil, fmt.Errorf("client: Log: unmarshaling dirent entry: %w", err)
+		}
+		entries = append(entries, entry)
+	}
+	var item Item
+	err = c.conn.ReadResponse(&item)
+	if err != nil {
+		return nil, fmt.Errorf("client: Log: reading final response: %w", err)
+	}
+	return entries, nil
 }
