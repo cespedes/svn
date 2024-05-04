@@ -212,11 +212,6 @@ func unmarshal(item Item, v reflect.Value) error {
 		}
 		return fmt.Errorf("cannot unmarshal a Number into kind %q", v.Kind())
 	case ListType:
-		// This converts any "( ( ... ) )" into "( ... )"
-		// TODO: not sure if this will always be correct
-		if len(item.List) == 1 && item.List[0].Type == ListType {
-			return unmarshal(item.List[0], v)
-		}
 		// zero-size lists: nothing to do
 		if len(item.List) == 0 {
 			return nil
@@ -227,6 +222,11 @@ func unmarshal(item Item, v reflect.Value) error {
 				v.Set(reflect.New(v.Type().Elem()))
 			}
 			v = v.Elem()
+		}
+		// This converts any "( ( ... ) )" into "( ... )" for non-slice, non-struct dests
+		// TODO: not sure if this will always be correct
+		if len(item.List) == 1 && item.List[0].Type == ListType && v.Kind() != reflect.Struct && v.Kind() != reflect.Slice {
+			return unmarshal(item.List[0], v)
 		}
 		switch v.Kind() {
 		case reflect.Struct:
