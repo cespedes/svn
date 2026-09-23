@@ -123,20 +123,19 @@ func Marshal(v any) (Item, error) {
 // If the pointer is nil, Unmarshal allocates a new value for it to point to.
 //
 // To unmarshal a list Item into a struct, Unmarshal matches the values
-// in the same order as they are declared in the struct.  If there are extra
-// fields in the struct, they are ignored.
+// in the same order as they are declared in the struct. Extra fields in
+// the struct, or extra elements in the list, are ignored.
 //
-// To unmarshal an Item into an interface value, Unmarshal stores one of these
-// in the interface value:
+// To unmarshal a list into a slice, Unmarshal grows the slice if the list
+// has more elements than it currently does, then overwrites the first
+// len(list) elements; any elements beyond that are left untouched.
 //
-//   - int, for numbers
-//   - string, for words or strings
-//   - []any, for lists
+// An empty list ( ( ) ) is a special case used by the protocol to represent
+// an absent optional value: unmarshaling one is a no-op, leaving the
+// destination (typically a pointer, which stays nil) exactly as it was.
 //
-// To unmarshal a list into a slice, Unmarshal resets the slice length
-// to zero and then appends each element to the slice. As a special case,
-// to unmarshal an empty list into a slice, Unmarshal replaces the slice
-// with a new empty slice.
+// Unmarshaling into an interface value is not supported and returns an
+// error.
 func Unmarshal(item Item, v any) error {
 	rv := reflect.ValueOf(v)
 	if rv.Kind() != reflect.Pointer || rv.IsNil() {
