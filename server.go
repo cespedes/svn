@@ -56,16 +56,21 @@ type Server struct {
 	// client asked for each LogEntry's Changed field to be populated.
 	Log func(paths []string, startRev uint, endRev uint, changedPaths bool) ([]LogEntry, error)
 
-	// Update is intended to answer an "update" command. It is currently
-	// unused: Serve replies "unimplemented" when it is nil, but never
-	// actually calls it when it is set, since the report/editor exchange
-	// that would drive an update is not implemented yet.
+	// Update is called for an "update" command, with the client's
+	// requested target revision (nil meaning the latest), the target path
+	// within the repository, and whether the update should recurse.
+	// It has no return value because the protocol does not reply to
+	// "update" beyond an initial acknowledgement: the actual result is
+	// meant to be driven by the report commands that follow (SetPath,
+	// ..., FinishReport), which is not implemented yet -- so Update
+	// currently has no way to affect what, if anything, gets sent back.
 	Update func(rev *uint, target string, recurse bool)
 
-	// SetPath is intended to answer a "set-path" command, part of the
-	// report mechanism used to drive an update. It is currently unused:
-	// Serve replies "unimplemented" when it is nil, but never actually
-	// calls it when it is set.
+	// SetPath is called for a "set-path" command, part of the report
+	// mechanism a client uses to describe what it already has before an
+	// update. As with Update, there is no way to report a result back
+	// from here yet: driving the resulting editor sequence is done in
+	// FinishReport.
 	SetPath func(path string, rev uint, startEmpty bool)
 
 	// FinishReport answers a "finish-report" command, which ends a report
@@ -454,6 +459,7 @@ func (s *Server) Serve(r io.Reader, w io.Writer) error {
 				}
 				continue
 			}
+			s.Update(args.Rev, args.Target, args.Recurse)
 			// empty auth-request:
 			if err = conn.WriteSuccess([]any{[]any{}, []byte{}}); err != nil {
 				return err
@@ -476,6 +482,7 @@ func (s *Server) Serve(r io.Reader, w io.Writer) error {
 				}
 				continue
 			}
+			s.SetPath(args.Path, args.Rev, args.StartEmpty)
 			// no response in set-path
 		case "finish-report": // From the Report Command Set
 			if s.FinishReport == nil {
