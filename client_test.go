@@ -34,12 +34,13 @@ func TestClientStatUnmarshalsAllFields(t *testing.T) {
 			return
 		}
 		// The actual "stat" response, shaped exactly like server.go's own
-		// "stat" case: a list with one element, which is the dirent tuple.
-		if err := sc.WriteSuccess([]any{[]any{
+		// "stat" case (and confirmed against a real svnserve): the dirent
+		// tuple nested two levels deep inside the optional-entry marker.
+		if err := sc.WriteSuccess([]any{[]any{[]any{
 			"file", uint64(1234), true, uint(42),
 			[]any{[]byte("2024-04-02T13:37:34.350221Z")},
 			[]any{[]byte("juan")},
-		}}); err != nil {
+		}}}); err != nil {
 			done <- err
 			return
 		}
@@ -93,6 +94,53 @@ func TestClientStatNoEntryReturnsError(t *testing.T) {
 
 	if _, err := c.Stat("does/not/exist", nil); err == nil {
 		t.Errorf("Stat: expected error, got none")
+	}
+
+	if err := <-done; err != nil {
+		t.Fatalf("fake server: %v", err)
+	}
+}
+
+// TestClientStatMatchesRealSvnserveWire replays a byte-for-byte capture of
+// a real svnserve's response to "( stat ( 0: ( ) ) )", reported against a
+// directory. It pins down the exact nesting real-world servers use, as
+// opposed to a hand-built approximation of it.
+func TestClientStatMatchesRealSvnserveWire(t *testing.T) {
+	c, server := newTestClient()
+	defer server.Close()
+
+	done := make(chan error, 1)
+	go func() {
+		var item Item
+		if err := (&conn{r: server}).Read(&item); err != nil {
+			done <- err
+			return
+		}
+		if _, err := server.Write([]byte("( success ( ( ) 0: ) ) ")); err != nil {
+			done <- err
+			return
+		}
+		if _, err := server.Write([]byte("( success ( ( ( dir 18446744073709551615 false 25416 ( 27:2026-09-23T11:59:39.809149Z ) ( 8:jane.doe ) ) ) ) ) ")); err != nil {
+			done <- err
+			return
+		}
+		done <- nil
+	}()
+
+	stat, err := c.Stat("", nil)
+	if err != nil {
+		t.Fatalf("Stat: %v", err)
+	}
+	want := Stat{
+		Kind:        "dir",
+		Size:        18446744073709551615, // svnserve's SVN_INVALID_FILESIZE, for a directory
+		HasProps:    false,
+		CreatedRev:  25416,
+		CreatedDate: "2026-09-23T11:59:39.809149Z",
+		LastAuthor:  "jane.doe",
+	}
+	if stat != want {
+		t.Errorf("Stat() = %+v, want %+v", stat, want)
 	}
 
 	if err := <-done; err != nil {

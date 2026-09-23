@@ -250,16 +250,20 @@ func (s *Server) Serve(r io.Reader, w io.Writer) error {
 			if err = conn.WriteSuccess([]any{[]any{}, []byte{}}); err != nil {
 				return err
 			}
-			// response: ( ? entry:dirent ) -- a list holding at most one
-			// element, which is itself the dirent tuple.
-			if err = conn.WriteSuccess([]any{[]any{
+			// response: ( ? entry:dirent ). A "?"/optional marker always
+			// wraps whatever it marks in its own 0-or-1-element list; since
+			// "entry" here is itself a compound dirent tuple (which is
+			// naturally its own list), a present entry ends up nested two
+			// levels deep. Confirmed against a real svnserve's own wire
+			// response, which sends exactly this shape.
+			if err = conn.WriteSuccess([]any{[]any{[]any{
 				entry.Kind,
 				entry.Size,
 				entry.HasProps,
 				entry.CreatedRev,
 				[]any{[]byte(entry.CreatedDate)},
 				[]any{[]byte(entry.LastAuthor)},
-			}}); err != nil {
+			}}}); err != nil {
 				return err
 			}
 		case "list":

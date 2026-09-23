@@ -214,18 +214,27 @@ func (c *Client) Stat(path string, rev *int) (Stat, error) {
 	}
 	input := []any{[]byte(path), lrev}
 
-	// The response is "( ? entry:dirent )": a list holding at most one
-	// element, which is itself the dirent tuple. Unmarshaling straight
-	// into a Stat would only ever fill its first field, since Stat is a
-	// plain struct and not a 0-or-1-element list like the protocol says.
-	entries, err := sendCommand[[]Stat](c, "stat", input)
+	// The response is "( ? entry:dirent )". A "?"/optional marker always
+	// wraps whatever it marks in its own 0-or-1-element list; since
+	// "entry" here is itself a compound dirent tuple (which is naturally
+	// its own list), a present entry ends up nested two levels deep:
+	// ( ( ( kind size has-props created-rev [date] [author] ) ) ).
+	// Confirmed against a real svnserve's own wire response, which sends
+	// exactly this shape -- unmarshaling straight into a Stat, or even
+	// into a single level of 0-or-1-element list, only ever fills the
+	// first field.
+	raw, err := sendCommand[Item](c, "stat", input)
 	if err != nil {
 		return Stat{}, err
 	}
-	if len(entries) == 0 {
+	if len(raw.List) == 0 || len(raw.List[0].List) == 0 {
 		return Stat{}, fmt.Errorf("stat: %q: no such file or directory", path)
 	}
-	return entries[0], nil
+	var stat Stat
+	if err := Unmarshal(raw.List[0].List[0], &stat); err != nil {
+		return Stat{}, fmt.Errorf("stat: %q: %w", path, err)
+	}
+	return stat, nil
 }
 
 // List sends a "list" command, asking for the entries of directory path at
