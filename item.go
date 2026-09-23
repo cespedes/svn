@@ -11,10 +11,19 @@ import (
 type ItemType int
 
 const (
+	// InvalidType is the zero value of ItemType: an Item that does not
+	// represent any actual protocol element (e.g. the result of marshaling
+	// a nil pointer).
 	InvalidType ItemType = iota
+	// WordType is a bare word, such as a command name, a boolean
+	// ("true"/"false") or an enum value: letters, digits and '-' only.
 	WordType
+	// NumberType is an unsigned integer.
 	NumberType
+	// StringType is a length-prefixed byte string ("N:the actual bytes"),
+	// used for arbitrary binary or text content that a word cannot hold.
 	StringType
+	// ListType is a parenthesized, whitespace-separated sequence of items.
 	ListType
 )
 
@@ -22,10 +31,14 @@ const (
 type Item struct {
 	// Type specifies the type of item, and which of the next fields is used
 	// to represent it.
-	Type   ItemType
+	Type ItemType
+	// Number holds the value when Type is NumberType; unused otherwise.
 	Number uint
-	Text   string
-	List   []Item
+	// Text holds the content when Type is WordType or StringType; unused
+	// otherwise.
+	Text string
+	// List holds the elements when Type is ListType; unused otherwise.
+	List []Item
 }
 
 // String returns a string representation of the Item.
@@ -64,7 +77,9 @@ func NewItemizer(r io.Reader) *Itemizer {
 
 var errRightParen = errors.New("right parentesis")
 
-// Item returns the next Item from the Itemizer
+// Item returns the next Item from the Itemizer. It returns io.EOF once the
+// underlying Reader is exhausted, or a syntax error if the input does not
+// follow the protocol's grammar.
 func (i *Itemizer) Item() (Item, error) {
 	var item Item
 	t := NewTokenizer(i.r)

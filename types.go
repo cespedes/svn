@@ -3,49 +3,87 @@ package svn
 // ReposInfo contains the general information in a repo.
 // It is filled after the initial connection.
 type ReposInfo struct {
-	UUID         string
-	URL          string
+	// UUID uniquely identifies the repository, regardless of the URL used
+	// to reach it.
+	UUID string
+	// URL is the repository's root URL, which may be a parent of the URL
+	// used to connect (if that URL pointed to a subdirectory).
+	URL string
+	// Capabilities lists the protocol capability words the server
+	// advertised (e.g. "depth", "mergeinfo", "log-revprops").
 	Capabilities []string
 }
 
 // Stat is the response for a "stat" command
 // (asking for the status of a path in a revision).
 type Stat struct {
-	Kind        string
-	Size        uint64
-	HasProps    bool
-	CreatedRev  uint
+	// Kind is the node kind: "file", "dir", or "none" if the path does not
+	// exist at the requested revision.
+	Kind string
+	// Size is the file's size in bytes. It is meaningless for directories.
+	Size uint64
+	// HasProps reports whether the node has any versioned properties.
+	HasProps bool
+	// CreatedRev is the revision in which the node was last changed.
+	CreatedRev uint
+	// CreatedDate is the commit date of CreatedRev, as an ISO 8601
+	// timestamp (e.g. "2024-04-02T13:37:34.350221Z").
 	CreatedDate string
-	LastAuthor  string
+	// LastAuthor is the value of the svn:author revision property for
+	// CreatedRev.
+	LastAuthor string
 }
 
 // Dirent is the response for the "list" command
 // (asking for list of files).
 type Dirent struct {
-	Path        string
-	Kind        string
-	Size        uint64
-	HasProps    bool
-	CreatedRev  uint
+	// Path is the entry's path, relative to the directory that was listed.
+	Path string
+	// Kind is the node kind: "file" or "dir".
+	Kind string
+	// Size is the file's size in bytes. It is meaningless for directories.
+	Size uint64
+	// HasProps reports whether the node has any versioned properties.
+	HasProps bool
+	// CreatedRev is the revision in which the node was last changed.
+	CreatedRev uint
+	// CreatedDate is the commit date of CreatedRev, as an ISO 8601
+	// timestamp (e.g. "2024-04-02T13:37:34.350221Z").
 	CreatedDate string
-	LastAuthor  string
+	// LastAuthor is the value of the svn:author revision property for
+	// CreatedRev.
+	LastAuthor string
 }
 
 // PropList is one of the responses for the "get-file" command
 // (asking for the contents of a file).
 type PropList struct {
-	Name  string
+	// Name is the property name, e.g. "svn:mime-type".
+	Name string
+	// Value is the property's value.
 	Value string
 }
 
 // LogEntry is every one of the responses for the "log" command.
 type LogEntry struct {
+	// Changed lists the paths that were added, modified, deleted or
+	// replaced in this revision. It is only populated when the "log"
+	// command was called with changedPaths set to true.
 	Changed []struct {
+		// Path is the affected path, relative to the repository root.
 		Path string
+		// Mode is a single-letter change type, as used by "svn log -v"
+		// (e.g. "A" added, "D" deleted, "M" modified, "R" replaced).
 		Mode string
 	}
-	Rev     uint
-	Author  string
-	Date    string
+	// Rev is the revision number.
+	Rev uint
+	// Author is the value of the svn:author revision property.
+	Author string
+	// Date is the value of the svn:date revision property, as an ISO 8601
+	// timestamp.
+	Date string
+	// Message is the value of the svn:log revision property (the commit
+	// message).
 	Message string
 }

@@ -4,9 +4,11 @@ import (
 	"fmt"
 )
 
-// ParseResponse expects an item following the prototype of "command response"
-// and returns the list of params if the type is "success".
-// It returns error otherwise.
+// ParseResponse expects i to be shaped like a "command response"
+// ( success params:list ) or ( failure ( err:error ... ) ), and returns
+// the params list when the response reports success. On failure, it
+// returns the reported [Error] as the error value; for any other shape,
+// it returns a generic syntax error.
 func ParseResponse(i Item) (Item, error) {
 	var resp struct {
 		Type   string

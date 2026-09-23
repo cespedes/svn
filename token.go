@@ -12,10 +12,15 @@ type TokenType int
 const (
 	// ErrorToken means that an error occurred during tokenization.
 	ErrorToken TokenType = iota
+	// WordToken is a bare word: letters, digits and '-' only.
 	WordToken
+	// NumberToken is an unsigned integer.
 	NumberToken
+	// StringToken is a length-prefixed byte string ("N:the actual bytes").
 	StringToken
+	// LeftParenToken is the "(" that opens a list.
 	LeftParenToken
+	// RightParenToken is the ")" that closes a list.
 	RightParenToken
 )
 
@@ -30,9 +35,14 @@ type Tokenizer struct {
 // A Token describes a token in a SVN conversation.
 // There are only 5 types of tokens: word, number, string, left and right parenthesis.
 type Token struct {
-	Type   TokenType
+	// Type specifies the type of token, and which of the next fields is
+	// used to represent it.
+	Type TokenType
+	// Number holds the value when Type is NumberToken; unused otherwise.
 	Number uint
-	Text   string
+	// Text holds the content when Type is WordToken or StringToken; unused
+	// otherwise.
+	Text string
 }
 
 // NewTokenizer returns a new SVN Tokenizer for the given Reader.

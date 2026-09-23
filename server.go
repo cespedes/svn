@@ -7,17 +7,72 @@ import (
 )
 
 // A Server defines parameters for running a SVN server.
+//
+// Each exported func field is a callback invoked when Serve receives the
+// matching command; leaving a field nil makes Serve reply "unimplemented"
+// to the client for that command, without calling anything.
 type Server struct {
-	ReposInfo    ReposInfo
-	Greet        func(version int, capabilities []string, url string, raclient string, client *string) (ReposInfo, error)
+	// ReposInfo holds the repository information (UUID, root URL,
+	// capabilities) sent to the client during the handshake. If Greet is
+	// set, it is responsible for filling this in instead; see Greet.
+	ReposInfo ReposInfo
+
+	// Greet, if set, is called once per connection with the version,
+	// capabilities and URL the client sent, plus its optional "ra-client"
+	// and "client" version strings (client is nil if the client omitted
+	// it). It must return the ReposInfo to report back to the client, or
+	// an error to reject the connection. If Greet is nil, Serve reports
+	// ReposInfo.URL as whatever URL the client sent, an empty
+	// Capabilities list, and a hardcoded placeholder UUID.
+	Greet func(version int, capabilities []string, url string, raclient string, client *string) (ReposInfo, error)
+
+	// GetLatestRev answers a "get-latest-rev" command, returning the
+	// repository's latest revision number.
 	GetLatestRev func() (int, error)
-	Stat         func(path string, rev *uint) (Dirent, error)
-	CheckPath    func(path string, rev *uint) (string, error)
-	List         func(path string, rev *uint, depth string, fields []string, pattern []string) ([]Dirent, error)
-	GetFile      func(path string, rev *uint, wantProps bool, wantContents bool) (uint, []PropList, []byte, error)
-	Log          func(paths []string, startRev uint, endRev uint, changedPaths bool) ([]LogEntry, error)
-	Update       func(rev *uint, target string, recurse bool)
-	SetPath      func(path string, rev uint, startEmpty bool)
+
+	// Stat answers a "stat" command, returning the status of path at rev
+	// (or at the latest revision, if rev is nil).
+	Stat func(path string, rev *uint) (Dirent, error)
+
+	// CheckPath answers a "check-path" command, returning the node kind
+	// ("file", "dir" or "none") of path at rev (or at the latest revision,
+	// if rev is nil).
+	CheckPath func(path string, rev *uint) (string, error)
+
+	// List answers a "list" command, returning the directory entries under
+	// path at rev. depth is one of the protocol's depth words (e.g.
+	// "immediates"), fields selects which optional Dirent fields the
+	// client wants populated, and pattern, if non-empty, restricts the
+	// result to entries matching one of the given glob patterns.
+	List func(path string, rev *uint, depth string, fields []string, pattern []string) ([]Dirent, error)
+
+	// GetFile answers a "get-file" command, returning the revision the
+	// content came from, the file's properties (if wantProps), and its
+	// content (if wantContents).
+	GetFile func(path string, rev *uint, wantProps bool, wantContents bool) (uint, []PropList, []byte, error)
+
+	// Log answers a "log" command, returning the log entries for paths
+	// between startRev and endRev. changedPaths reports whether the
+	// client asked for each LogEntry's Changed field to be populated.
+	Log func(paths []string, startRev uint, endRev uint, changedPaths bool) ([]LogEntry, error)
+
+	// Update is intended to answer an "update" command. It is currently
+	// unused: Serve replies "unimplemented" when it is nil, but never
+	// actually calls it when it is set, since the report/editor exchange
+	// that would drive an update is not implemented yet.
+	Update func(rev *uint, target string, recurse bool)
+
+	// SetPath is intended to answer a "set-path" command, part of the
+	// report mechanism used to drive an update. It is currently unused:
+	// Serve replies "unimplemented" when it is nil, but never actually
+	// calls it when it is set.
+	SetPath func(path string, rev uint, startEmpty bool)
+
+	// FinishReport answers a "finish-report" command, which ends a report
+	// and should drive an editor command sequence (open-root, ...,
+	// close-edit) back to the client. It must return the sequence of
+	// editor commands as Items, or an error to send an "abort-edit"
+	// instead.
 	FinishReport func() ([]Item, error)
 }
 

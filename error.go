@@ -2,16 +2,25 @@ package svn
 
 import "fmt"
 
-// Error is the reprensentation of a "failure"
-// command response.  It also implements the
-// error interface.
+// Error is the representation of a "failure" command response, as sent by
+// a server to report that a command could not be completed. It also
+// implements the error interface.
 type Error struct {
-	AprErr  int
-	Message string `svn:",xxx"`
-	File    string `svn:",xxx"`
-	Line    int
+	// AprErr is the APR error code the server reported (an svn-specific
+	// numeric error code, not a POSIX errno).
+	AprErr int
+	// Message is the human-readable error message.
+	Message string
+	// File is the server-side source file that raised the error, if the
+	// server included it. It is empty otherwise.
+	File string
+	// Line is the source line within File, meaningful only when File is
+	// non-empty.
+	Line int
 }
 
+// Error returns a human-readable representation of e, combining its APR
+// error code, message, and source location (when the server provided one).
 func (e Error) Error() string {
 	msg := ""
 	if e.AprErr != 0 {

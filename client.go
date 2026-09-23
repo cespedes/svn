@@ -14,12 +14,13 @@ const SvnClient = "GoSVN/0.0.0"
 type Client struct {
 	conn conn
 	cmd  *exec.Cmd
+	// Info holds the repository information (UUID, root URL, capabilities)
+	// received from the server during Connect.
 	Info ReposInfo
 }
 
-// Connect creates a [Client] and establishes a connection
-// to a SVN server, using the given address
-// to find out know how to connect to it.
+// Connect creates a [Client] and establishes a connection to a SVN server,
+// using the scheme of the given address to find out how to reach it.
 //
 // Right now, it works only with "file" and "svn+ssh" URLs,
 // invoking "svnserve -t" (locally or remotely) to connect
@@ -203,8 +204,9 @@ func (c *Client) GetLatestRev() (int, error) {
 	return sendCommand[int](c, "get-latest-rev", []any{})
 }
 
-// Stat sends a "stat" command, asking for the status of a path in a revision.
-// "rev" can be nil or a pointer to an integer.
+// Stat sends a "stat" command, asking for the status of path at rev, or at
+// the latest revision if rev is nil. It returns an error if path does not
+// exist at that revision.
 func (c *Client) Stat(path string, rev *int) (Stat, error) {
 	lrev := []int{}
 	if rev != nil {
@@ -226,7 +228,13 @@ func (c *Client) Stat(path string, rev *int) (Stat, error) {
 	return entries[0], nil
 }
 
-// List sends a "list" command, asking for list of files.
+// List sends a "list" command, asking for the entries of directory path at
+// rev (or at the latest revision, if rev is nil). depth is one of the
+// protocol's depth words (e.g. "immediates" for just the direct children,
+// "infinity" for the full subtree). fields selects which optional Dirent
+// fields to populate (e.g. "size", "created-rev", "time", "last-author").
+// Dirent.Kind is always present in the result, but comes back as "unknown"
+// unless "kind" is included in fields too.
 func (c *Client) List(path string, rev *int, depth string, fields []string) ([]Dirent, error) {
 	lrev := []int{}
 	if rev != nil {
@@ -280,7 +288,11 @@ func (c *Client) List(path string, rev *int, depth string, fields []string) ([]D
 //    response: ( [ checksum:string ] rev:number props:proplist
 //                [ inherited-props:iproplist ] )
 
-// GetFile sends a "get-file" command, asking for the contents of a file.
+// GetFile sends a "get-file" command, asking for the properties and/or
+// contents of the file at path and rev (or at the latest revision, if rev
+// is nil). The server is expected to return properties only if wantProps
+// is true; content is read and returned in full only if wantContent is
+// true, otherwise the returned []byte is nil.
 func (c *Client) GetFile(path string, rev *int, wantProps bool, wantContent bool) ([]PropList, []byte, error) {
 	lrev := []int{}
 	if rev != nil {
@@ -338,8 +350,12 @@ func (c *Client) GetFile(path string, rev *int, wantProps bool, wantContent bool
 //                ? include-merged-revisions:bool
 //                all-revprops | revprops ( revprop:string ... ) )
 
-// write(4, "( log ( ( 0: ) ( 22261 ) ( 0 ) false false 0 false revprops ( 10:svn:author 8:svn:date 7:svn:log ) ) ) ", 103) = 103
-// Log sends a "log" command, asking for log entries.
+// Log sends a "log" command, asking for the log entries between startRev
+// and endRev. A nil paths defaults to the repository root; a nil startRev
+// means the latest revision, and a nil endRev means revision 0 (the
+// beginning of history) -- so the zero value of all three arguments asks
+// for the full history of the repository root. changedPaths reports
+// whether each returned LogEntry.Changed should be populated.
 func (c *Client) Log(paths []string, startRev *int, endRev *int, changedPaths bool) ([]LogEntry, error) {
 	srev := []int{}
 	if startRev != nil {

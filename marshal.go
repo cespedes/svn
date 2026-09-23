@@ -6,23 +6,28 @@ import (
 	"reflect"
 )
 
-//	WordType ItemType = iota
-//	NumberType
-//	StringType
-//	ListType
-
 // Marshal converts v into an Item.
 //
 // Marshal traverses the value v recursively.
 //
+// If v is already an Item, it is returned unchanged.
+//
 // Floating point and integer values encode as numbers.
 //
-// String values encode as words.
+// String values encode as words. Since a word may only contain
+// alphanumerics and '-' on the wire, a string with any other character
+// (spaces, ':', '/', ...) must be sent as []byte instead, which encodes as
+// a (length-prefixed) string and can hold arbitrary content.
 //
 // Bool values encode as words "true" or "false".
 //
 // Array, slice and struct values encode as lists, except that []byte
-// values encode as strings.
+// values encode as strings. Only a struct's exported fields are marshaled,
+// in declaration order; this is a positional protocol, so field names are
+// never sent.
+//
+// A nil pointer marshals to nothing (it is dropped from the enclosing
+// list, if any); a non-nil pointer marshals as the value it points to.
 func Marshal(v any) (Item, error) {
 	if i, ok := v.(Item); ok {
 		return i, nil
