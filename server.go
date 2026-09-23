@@ -190,14 +190,16 @@ func (s *Server) Serve(r io.Reader, w io.Writer) error {
 			if err = conn.WriteSuccess([]any{[]any{}, []byte{}}); err != nil {
 				return err
 			}
-			if err = conn.WriteSuccess([]any{[]any{[]any{
+			// response: ( ? entry:dirent ) -- a list holding at most one
+			// element, which is itself the dirent tuple.
+			if err = conn.WriteSuccess([]any{[]any{
 				entry.Kind,
 				entry.Size,
 				entry.HasProps,
 				entry.CreatedRev,
 				[]any{[]byte(entry.CreatedDate)},
 				[]any{[]byte(entry.LastAuthor)},
-			}}}); err != nil {
+			}}); err != nil {
 				return err
 			}
 		case "list":

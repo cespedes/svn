@@ -187,7 +187,18 @@ func (c *Client) Stat(path string, rev *int) (Stat, error) {
 	}
 	input := []any{[]byte(path), lrev}
 
-	return sendCommand[Stat](c, "stat", input)
+	// The response is "( ? entry:dirent )": a list holding at most one
+	// element, which is itself the dirent tuple. Unmarshaling straight
+	// into a Stat would only ever fill its first field, since Stat is a
+	// plain struct and not a 0-or-1-element list like the protocol says.
+	entries, err := sendCommand[[]Stat](c, "stat", input)
+	if err != nil {
+		return Stat{}, err
+	}
+	if len(entries) == 0 {
+		return Stat{}, fmt.Errorf("stat: %q: no such file or directory", path)
+	}
+	return entries[0], nil
 }
 
 // List sends a "list" command, asking for list of files.
