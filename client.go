@@ -294,6 +294,15 @@ func (c *Client) GetFile(path string, rev *int, wantProps bool, wantContent bool
 		content = append(content, b...)
 	}
 
+	// The protocol sends a second, empty command response after the content
+	// terminator, to report whether an error occurred while sending the
+	// file. It must be consumed here, or it will desync the connection for
+	// whatever command runs next.
+	var final Item
+	if err = c.conn.ReadResponse(&final); err != nil {
+		return nil, nil, fmt.Errorf("GetFile: reading final response: %w", err)
+	}
+
 	return response.Props, content, nil
 }
 

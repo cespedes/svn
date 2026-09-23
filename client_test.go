@@ -98,3 +98,82 @@ func TestClientStatNoEntryReturnsError(t *testing.T) {
 		t.Fatalf("fake server: %v", err)
 	}
 }
+
+// TestClientGetFileConsumesFinalResponse checks that GetFile reads the
+// second, empty command response the protocol sends after the content
+// terminator. If it didn't, that response would be left on the wire and
+// would desync whatever command runs next on the same connection -- which
+// is exactly what this test would catch, since it issues a GetLatestRev
+// right after and expects a clean, correct answer.
+func TestClientGetFileConsumesFinalResponse(t *testing.T) {
+	c, server := newTestClient()
+	defer server.Close()
+
+	done := make(chan error, 1)
+	go func() {
+		sc := conn{r: server, w: server}
+
+		// "get-file" exchange.
+		var item Item
+		if err := sc.Read(&item); err != nil {
+			done <- err
+			return
+		}
+		if err := sc.WriteSuccess([]any{[]any{}, []byte{}}); err != nil {
+			done <- err
+			return
+		}
+		if err := sc.WriteSuccess([]any{[]any{}, 1, []any{}}); err != nil {
+			done <- err
+			return
+		}
+		if err := sc.Write([]byte("hello")); err != nil {
+			done <- err
+			return
+		}
+		if err := sc.Write([]byte{}); err != nil {
+			done <- err
+			return
+		}
+		if err := sc.WriteSuccess([]any{}); err != nil {
+			done <- err
+			return
+		}
+
+		// A second, unrelated command right after: if GetFile left the
+		// final response above unread, this exchange would desync.
+		if err := sc.Read(&item); err != nil {
+			done <- err
+			return
+		}
+		if err := sc.WriteSuccess([]any{[]any{}, []byte{}}); err != nil {
+			done <- err
+			return
+		}
+		if err := sc.WriteSuccess([]any{42}); err != nil {
+			done <- err
+			return
+		}
+		done <- nil
+	}()
+
+	_, content, err := c.GetFile("trunk/foo.txt", nil, true, true)
+	if err != nil {
+		t.Fatalf("GetFile: %v", err)
+	}
+	if string(content) != "hello" {
+		t.Errorf("content = %q, want %q", content, "hello")
+	}
+
+	rev, err := c.GetLatestRev()
+	if err != nil {
+		t.Fatalf("GetLatestRev after GetFile: %v", err)
+	}
+	if rev != 42 {
+		t.Errorf("GetLatestRev() = %d, want 42", rev)
+	}
+
+	if err := <-done; err != nil {
+		t.Fatalf("fake server: %v", err)
+	}
+}
