@@ -125,6 +125,27 @@ func (c *Client) exec(name string, arg ...string) error {
 	return c.cmd.Start()
 }
 
+// chooseAuthMechanism picks which SASL mechanism to use given the list of
+// mechanisms a server offered in an auth-request, preferring EXTERNAL (no
+// credentials needed beyond the already-authenticated transport) and
+// falling back to ANONYMOUS. It returns an error if the server offers
+// neither, since this client does not implement any other mechanism.
+func chooseAuthMechanism(offered []string) (string, error) {
+	haveAnonymous := false
+	for _, mech := range offered {
+		if mech == "EXTERNAL" {
+			return "EXTERNAL", nil
+		}
+		if mech == "ANONYMOUS" {
+			haveAnonymous = true
+		}
+	}
+	if haveAnonymous {
+		return "ANONYMOUS", nil
+	}
+	return "", fmt.Errorf("client: no supported auth mechanism in %v", offered)
+}
+
 func (c *Client) handleAuth() error {
 	var authRequest struct {
 		Mechanisms []string
@@ -137,8 +158,12 @@ func (c *Client) handleAuth() error {
 	if len(authRequest.Mechanisms) == 0 {
 		return nil
 	}
+	mech, err := chooseAuthMechanism(authRequest.Mechanisms)
+	if err != nil {
+		return err
+	}
 	err = c.conn.Write([]any{
-		"EXTERNAL",
+		mech,
 		[]any{
 			[]byte{},
 		},

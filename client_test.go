@@ -1,6 +1,7 @@
 package svn
 
 import (
+	"fmt"
 	"net"
 	"testing"
 )
@@ -173,6 +174,85 @@ func TestClientGetFileConsumesFinalResponse(t *testing.T) {
 		t.Errorf("GetLatestRev() = %d, want 42", rev)
 	}
 
+	if err := <-done; err != nil {
+		t.Fatalf("fake server: %v", err)
+	}
+}
+
+func TestChooseAuthMechanism(t *testing.T) {
+	cases := []struct {
+		desc    string
+		offered []string
+		want    string
+		wantErr bool
+	}{
+		{"prefers EXTERNAL", []string{"ANONYMOUS", "EXTERNAL"}, "EXTERNAL", false},
+		{"falls back to ANONYMOUS", []string{"ANONYMOUS"}, "ANONYMOUS", false},
+		{"only EXTERNAL offered", []string{"EXTERNAL"}, "EXTERNAL", false},
+		{"unsupported mechanism only", []string{"CRAM-MD5"}, "", true},
+		{"nothing offered", nil, "", true},
+	}
+	for _, tt := range cases {
+		t.Run(tt.desc, func(t *testing.T) {
+			got, err := chooseAuthMechanism(tt.offered)
+			if tt.wantErr {
+				if err == nil {
+					t.Errorf("chooseAuthMechanism(%v): expected error, got mechanism %q", tt.offered, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("chooseAuthMechanism(%v): unexpected error: %v", tt.offered, err)
+			}
+			if got != tt.want {
+				t.Errorf("chooseAuthMechanism(%v) = %q, want %q", tt.offered, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestClientHandleAuthUsesOfferedMechanism checks that the client picks a
+// mechanism the server actually offered (ANONYMOUS here, no EXTERNAL)
+// instead of hardcoding one, by having the fake server reject anything but
+// ANONYMOUS.
+func TestClientHandleAuthUsesOfferedMechanism(t *testing.T) {
+	c, server := newTestClient()
+	defer server.Close()
+
+	done := make(chan error, 1)
+	go func() {
+		sc := conn{r: server, w: server}
+		if err := sc.WriteSuccess([]any{
+			[]any{"ANONYMOUS"},
+			[]byte("realm"),
+		}); err != nil {
+			done <- err
+			return
+		}
+		// The token that follows the mechanism word is ignored here; extra
+		// list elements beyond a struct's fields are simply left unread by
+		// Unmarshal.
+		var authResponse struct {
+			Mechanism string
+		}
+		if err := sc.Read(&authResponse); err != nil {
+			done <- err
+			return
+		}
+		if authResponse.Mechanism != "ANONYMOUS" {
+			done <- fmt.Errorf("client sent mechanism %q, want ANONYMOUS", authResponse.Mechanism)
+			return
+		}
+		if err := sc.WriteSuccess([]any{}); err != nil {
+			done <- err
+			return
+		}
+		done <- nil
+	}()
+
+	if err := c.handleAuth(); err != nil {
+		t.Fatalf("handleAuth: %v", err)
+	}
 	if err := <-done; err != nil {
 		t.Fatalf("fake server: %v", err)
 	}
