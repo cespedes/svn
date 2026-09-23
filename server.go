@@ -143,21 +143,31 @@ func (s *Server) Serve(r io.Reader, w io.Writer) error {
 		switch command.Name {
 		case "get-latest-rev":
 			if s.GetLatestRev == nil {
-				replyUnimplemented(conn, command.Name)
+				if err = replyUnimplemented(conn, command.Name); err != nil {
+					return err
+				}
 				continue
 			}
 			rev, err := s.GetLatestRev()
 			if err != nil {
-				conn.WriteFailure(err)
+				if err = conn.WriteFailure(err); err != nil {
+					return err
+				}
 				continue
 			}
 			// empty auth-request:
-			conn.WriteSuccess([]any{[]any{}, []byte{}})
-			conn.WriteSuccess([]any{rev})
+			if err = conn.WriteSuccess([]any{[]any{}, []byte{}}); err != nil {
+				return err
+			}
+			if err = conn.WriteSuccess([]any{rev}); err != nil {
+				return err
+			}
 		case "stat":
 			// params: ( path:string [ rev:number ] )
 			if s.Stat == nil {
-				replyUnimplemented(conn, command.Name)
+				if err = replyUnimplemented(conn, command.Name); err != nil {
+					return err
+				}
 				continue
 			}
 			var args struct {
@@ -165,27 +175,37 @@ func (s *Server) Serve(r io.Reader, w io.Writer) error {
 				Rev  *uint
 			}
 			if err = Unmarshal(command.Params, &args); err != nil {
-				conn.WriteFailure(neterr)
+				if err = conn.WriteFailure(neterr); err != nil {
+					return err
+				}
 				continue
 			}
 			entry, err := s.Stat(args.Path, args.Rev)
 			if err != nil {
-				conn.WriteFailure(err)
+				if err = conn.WriteFailure(err); err != nil {
+					return err
+				}
 				continue
 			}
-			conn.WriteSuccess([]any{[]any{}, []byte{}})
-			conn.WriteSuccess([]any{[]any{[]any{
+			if err = conn.WriteSuccess([]any{[]any{}, []byte{}}); err != nil {
+				return err
+			}
+			if err = conn.WriteSuccess([]any{[]any{[]any{
 				entry.Kind,
 				entry.Size,
 				entry.HasProps,
 				entry.CreatedRev,
 				[]any{[]byte(entry.CreatedDate)},
 				[]any{[]byte(entry.LastAuthor)},
-			}}})
+			}}}); err != nil {
+				return err
+			}
 		case "list":
 			// params: ( path:string [ rev:number ] depth:word ( field:dirent-field ... ) ? ( pattern:string ... ) )
 			if s.List == nil {
-				replyUnimplemented(conn, command.Name)
+				if err = replyUnimplemented(conn, command.Name); err != nil {
+					return err
+				}
 				continue
 			}
 			var args struct {
@@ -196,17 +216,23 @@ func (s *Server) Serve(r io.Reader, w io.Writer) error {
 				Pattern []string
 			}
 			if err = Unmarshal(command.Params, &args); err != nil {
-				conn.WriteFailure(neterr)
+				if err = conn.WriteFailure(neterr); err != nil {
+					return err
+				}
 				continue
 			}
 			dirents, err := s.List(args.Path, args.Rev, args.Depth, args.Fields, args.Pattern)
 			if err != nil {
-				conn.WriteFailure(err)
+				if err = conn.WriteFailure(err); err != nil {
+					return err
+				}
 				continue
 			}
-			conn.WriteSuccess([]any{[]any{}, []byte{}})
+			if err = conn.WriteSuccess([]any{[]any{}, []byte{}}); err != nil {
+				return err
+			}
 			for _, d := range dirents {
-				conn.Write([]any{
+				if err = conn.Write([]any{
 					[]byte(d.Path),
 					d.Kind,
 					[]any{d.Size},
@@ -214,14 +240,22 @@ func (s *Server) Serve(r io.Reader, w io.Writer) error {
 					[]any{d.CreatedRev},
 					[]any{[]byte(d.CreatedDate)},
 					[]any{[]byte(d.LastAuthor)},
-				})
+				}); err != nil {
+					return err
+				}
 			}
-			conn.Write("done")
-			conn.WriteSuccess([]any{})
+			if err = conn.Write("done"); err != nil {
+				return err
+			}
+			if err = conn.WriteSuccess([]any{}); err != nil {
+				return err
+			}
 		case "check-path":
 			// params: ( path:string [ rev:number ] )
 			if s.CheckPath == nil {
-				replyUnimplemented(conn, command.Name)
+				if err = replyUnimplemented(conn, command.Name); err != nil {
+					return err
+				}
 				continue
 			}
 			var args struct {
@@ -229,20 +263,30 @@ func (s *Server) Serve(r io.Reader, w io.Writer) error {
 				Rev  *uint
 			}
 			if err = Unmarshal(command.Params, &args); err != nil {
-				conn.WriteFailure(neterr)
+				if err = conn.WriteFailure(neterr); err != nil {
+					return err
+				}
 				continue
 			}
 			kind, err := s.CheckPath(args.Path, args.Rev)
 			if err != nil {
-				conn.WriteFailure(err)
+				if err = conn.WriteFailure(err); err != nil {
+					return err
+				}
 				continue
 			}
-			conn.WriteSuccess([]any{[]any{}, []byte{}})
-			conn.WriteSuccess([]any{kind})
+			if err = conn.WriteSuccess([]any{[]any{}, []byte{}}); err != nil {
+				return err
+			}
+			if err = conn.WriteSuccess([]any{kind}); err != nil {
+				return err
+			}
 		case "get-file":
 			// params: ( path:string [ rev:number ] want-props:bool want-contents:bool ? want-iprops:bool )
 			if s.GetFile == nil {
-				replyUnimplemented(conn, command.Name)
+				if err = replyUnimplemented(conn, command.Name); err != nil {
+					return err
+				}
 				continue
 			}
 			var args struct {
@@ -252,26 +296,42 @@ func (s *Server) Serve(r io.Reader, w io.Writer) error {
 				WantContents bool
 			}
 			if err = Unmarshal(command.Params, &args); err != nil {
-				conn.WriteFailure(neterr)
+				if err = conn.WriteFailure(neterr); err != nil {
+					return err
+				}
 				continue
 			}
 			rev, proplist, contents, err := s.GetFile(args.Path, args.Rev, args.WantProps, args.WantContents)
 			if err != nil {
-				conn.WriteFailure(err)
+				if err = conn.WriteFailure(err); err != nil {
+					return err
+				}
 				continue
 			}
 			checksum := []byte(fmt.Sprintf("%x", md5.Sum(contents)))
-			conn.WriteSuccess([]any{[]any{}, []byte{}})
-			conn.WriteSuccess([]any{[]any{checksum}, rev, proplist})
+			if err = conn.WriteSuccess([]any{[]any{}, []byte{}}); err != nil {
+				return err
+			}
+			if err = conn.WriteSuccess([]any{[]any{checksum}, rev, proplist}); err != nil {
+				return err
+			}
 			if args.WantContents {
-				conn.Write(contents)
-				conn.Write([]byte{})
-				conn.WriteSuccess([]any{})
+				if err = conn.Write(contents); err != nil {
+					return err
+				}
+				if err = conn.Write([]byte{}); err != nil {
+					return err
+				}
+				if err = conn.WriteSuccess([]any{}); err != nil {
+					return err
+				}
 			}
 		case "log":
 			// params: ( ( target-path:string ... ) [ start-rev:number ] [ end-rev:number ] changed-paths:bool strict-node:bool ? limit:number ? include-merged-revisions:bool all-revprops | revprops ( revprop:string ... ) )
 			if s.Log == nil {
-				replyUnimplemented(conn, command.Name)
+				if err = replyUnimplemented(conn, command.Name); err != nil {
+					return err
+				}
 				continue
 			}
 			var args struct {
@@ -286,30 +346,44 @@ func (s *Server) Serve(r io.Reader, w io.Writer) error {
 				Revprops               []string
 			}
 			if err = Unmarshal(command.Params, &args); err != nil {
-				conn.WriteFailure(neterr)
+				if err = conn.WriteFailure(neterr); err != nil {
+					return err
+				}
 				continue
 			}
 			logEntries, err := s.Log(args.Paths, args.StartRev, args.EndRev, args.ChangedPaths)
 			if err != nil {
-				conn.WriteFailure(err)
+				if err = conn.WriteFailure(err); err != nil {
+					return err
+				}
 				continue
 			}
-			conn.WriteSuccess([]any{[]any{}, []byte{}})
+			if err = conn.WriteSuccess([]any{[]any{}, []byte{}}); err != nil {
+				return err
+			}
 			for _, l := range logEntries {
 				// ( ( ) 7573 ( 3:noc ) ( 27:2024-04-02T13:37:34.350221Z ) ( 43:New open position: 2024-04-phd-visiting-apt ) false false 0 ( ) false )
-				conn.Write([]any{
+				if err = conn.Write([]any{
 					l.Changed,
 					l.Rev,
 					[]any{[]byte(l.Author)},
 					[]any{[]byte(l.Date)},
 					[]any{[]byte(l.Message)},
-				})
+				}); err != nil {
+					return err
+				}
 			}
-			conn.Write("done")
-			conn.WriteSuccess([]any{})
+			if err = conn.Write("done"); err != nil {
+				return err
+			}
+			if err = conn.WriteSuccess([]any{}); err != nil {
+				return err
+			}
 		case "update":
 			if s.Update == nil {
-				replyUnimplemented(conn, command.Name)
+				if err = replyUnimplemented(conn, command.Name); err != nil {
+					return err
+				}
 				continue
 			}
 			var args struct {
@@ -318,14 +392,20 @@ func (s *Server) Serve(r io.Reader, w io.Writer) error {
 				Recurse bool
 			}
 			if err = Unmarshal(command.Params, &args); err != nil {
-				conn.WriteFailure(neterr)
+				if err = conn.WriteFailure(neterr); err != nil {
+					return err
+				}
 				continue
 			}
 			// empty auth-request:
-			conn.WriteSuccess([]any{[]any{}, []byte{}})
+			if err = conn.WriteSuccess([]any{[]any{}, []byte{}}); err != nil {
+				return err
+			}
 		case "set-path": // From the Report Command Set
 			if s.SetPath == nil {
-				replyUnimplemented(conn, command.Name)
+				if err = replyUnimplemented(conn, command.Name); err != nil {
+					return err
+				}
 				continue
 			}
 			var args struct {
@@ -334,26 +414,38 @@ func (s *Server) Serve(r io.Reader, w io.Writer) error {
 				StartEmpty bool
 			}
 			if err = Unmarshal(command.Params, &args); err != nil {
-				conn.WriteFailure(neterr)
+				if err = conn.WriteFailure(neterr); err != nil {
+					return err
+				}
 				continue
 			}
 			// no response in set-path
 		case "finish-report": // From the Report Command Set
 			if s.FinishReport == nil {
-				replyUnimplemented(conn, command.Name)
+				if err = replyUnimplemented(conn, command.Name); err != nil {
+					return err
+				}
 				continue
 			}
 			// no response?
-			conn.WriteSuccess([]any{[]any{}, []byte{}})
+			if err = conn.WriteSuccess([]any{[]any{}, []byte{}}); err != nil {
+				return err
+			}
 			items, err := s.FinishReport()
 			if err != nil {
-				conn.Write([]any{"abort-edit", []any{}})
+				if err = conn.Write([]any{"abort-edit", []any{}}); err != nil {
+					return err
+				}
 				continue
 			}
 			for _, i := range items {
-				conn.Write(i)
+				if err = conn.Write(i); err != nil {
+					return err
+				}
 			}
-			conn.Write([]any{"close-edit", []any{}})
+			if err = conn.Write([]any{"close-edit", []any{}}); err != nil {
+				return err
+			}
 			err = conn.ReadResponse(&item)
 			if err != nil {
 				return err
@@ -363,18 +455,20 @@ func (s *Server) Serve(r io.Reader, w io.Writer) error {
 				return err
 			}
 		default:
-			conn.WriteFailure(Error{
+			if err = conn.WriteFailure(Error{
 				AprErr:  210001,
 				Message: fmt.Sprintf("Unknown command '%s'", command.Name),
-			})
+			}); err != nil {
+				return err
+			}
 			// ( failure ( ( 210001 34:Unknown editor command 'no-existe' 0: 0 ) ) )
 			// return fmt.Errorf("unknown command %q", command.Name)
 		}
 	}
 }
 
-func replyUnimplemented(conn conn, cmd string) {
-	conn.WriteFailure(Error{
+func replyUnimplemented(conn conn, cmd string) error {
+	return conn.WriteFailure(Error{
 		AprErr:  210001,
 		Message: fmt.Sprintf("Command '%s' unimplemented", cmd),
 	})

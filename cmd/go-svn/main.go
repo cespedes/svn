@@ -5,7 +5,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"log"
 	"net/url"
 	"os"
 	"strconv"
@@ -85,7 +84,6 @@ func run(args []string, stdout io.Writer) error {
 		return fmt.Errorf(`unknown subcommand: '%s'
 Type 'svn help' for usage`, args[0])
 	}
-	return nil
 }
 
 func svnInfo(repo string, lrev *int, stdout io.Writer) error {
@@ -97,7 +95,7 @@ func svnInfo(repo string, lrev *int, stdout io.Writer) error {
 
 	rev, err := c.GetLatestRev()
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
 
 	stat, err := c.Stat("", nil)
@@ -217,7 +215,7 @@ func svnLog(repo string, lrev1 *int, lrev2 *int, verbose bool, stdout io.Writer)
 
 	logs, err := c.Log(nil, lrev1, lrev2, verbose)
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
 
 	for _, l := range logs {

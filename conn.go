@@ -19,7 +19,7 @@ type conn struct {
 func (c *conn) Write(what any) error {
 	item, err := Marshal(what)
 	if err != nil {
-		return nil
+		return err
 	}
 	_, err = c.w.Write([]byte(item.String() + " "))
 	return err
