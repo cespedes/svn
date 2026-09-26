@@ -221,3 +221,43 @@ func TestIsPlainCheckout(t *testing.T) {
 		})
 	}
 }
+
+// TestSplitCheckoutEntriesAnchoredSession checks that splitCheckoutEntries
+// correctly identifies the self-entry -- and childName correctly strips
+// it -- even when Dirent.Path values are shaped as a real svnserve sends
+// them for a session anchored below the repository root (e.g. a checkout
+// of ".../repo/trunk"): repository-root-relative ("/trunk", not "/"),
+// confirmed against a real svnserve to always be this way regardless of
+// what path CheckoutEdit/UpdateEdit queried with (always "" for the
+// report's own root). Before this, an earlier version of
+// splitCheckoutEntries assumed the self-entry's Path was always
+// "/" + the queried path, which only holds when the session isn't
+// anchored -- confirmed to cause a real "svn checkout"/"svn update" of a
+// repository subdirectory to fail outright with "E210004: Malformed
+// network data".
+func TestSplitCheckoutEntriesAnchoredSession(t *testing.T) {
+	entries := []Dirent{
+		{Path: "/trunk/sub", Kind: "dir"},
+		{Path: "/trunk", Kind: "dir"},
+		{Path: "/trunk/main.go", Kind: "file"},
+	}
+	self, children := splitCheckoutEntries(entries)
+	if self == nil || self.Path != "/trunk" {
+		t.Fatalf("self = %+v, want a Path of /trunk", self)
+	}
+	if len(children) != 2 {
+		t.Fatalf("len(children) = %d, want 2 (children: %+v)", len(children), children)
+	}
+	for _, c := range children {
+		if c.Path == self.Path {
+			t.Errorf("self-entry %q leaked into children", c.Path)
+		}
+	}
+	names := map[string]bool{}
+	for _, c := range children {
+		names[childName(c, self.Path)] = true
+	}
+	if !names["main.go"] || !names["sub"] {
+		t.Errorf("childName results = %v, want exactly {main.go, sub}", names)
+	}
+}

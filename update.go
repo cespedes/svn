@@ -64,21 +64,23 @@ func (s *Server) UpdateEdit(path string, fromRev, toRev uint) ([]Item, error) {
 	if err != nil {
 		return nil, err
 	}
-	self, toChildren := splitCheckoutEntries(toEntries, path)
+	self, toChildren := splitCheckoutEntries(toEntries)
 	fromEntries, err := s.listOrEmpty(path, fromRev)
 	if err != nil {
 		return nil, err
 	}
-	_, fromChildren := splitCheckoutEntries(fromEntries, path)
+	_, fromChildren := splitCheckoutEntries(fromEntries)
 
 	e := NewEditorWriter()
 	if err := e.TargetRev(toRev); err != nil {
 		return nil, err
 	}
 	var rootRev *uint
+	var selfPath string
 	if self != nil {
 		r := self.CreatedRev
 		rootRev = &r
+		selfPath = self.Path
 	}
 	if err := e.OpenRoot(rootRev); err != nil {
 		return nil, err
@@ -88,7 +90,7 @@ func (s *Server) UpdateEdit(path string, fromRev, toRev uint) ([]Item, error) {
 			return nil, err
 		}
 	}
-	if err := s.updateChildren(e, path, "", fromChildren, toChildren, fromRev, toRev); err != nil {
+	if err := s.updateChildren(e, path, "", selfPath, fromChildren, toChildren, fromRev, toRev); err != nil {
 		return nil, err
 	}
 	if err := e.CloseDir(); err != nil {
@@ -114,21 +116,22 @@ func (s *Server) listOrEmpty(path string, rev uint) ([]Dirent, error) {
 
 // updateChildren describes, under e's currently open directory, the
 // difference between fromChildren and toChildren (the already-listed
-// direct children of dirPath at fromRev and toRev respectively): removed
+// direct children of dirPath at fromRev and toRev respectively, both
+// children of the same directory, whose own Path is selfPath): removed
 // or kind-changed entries first, as a real svnserve orders them, then
 // every entry still present at toRev (new, modified, unchanged-but-
 // visited, or recursed into). wirePath is dirPath's equivalent relative
 // to the edit's own root; see EditorWriter's doc comment on why every
 // Editor Command Set path must be in that form, not dirPath's own
 // (session-anchor-relative) form.
-func (s *Server) updateChildren(e *EditorWriter, dirPath, wirePath string, fromChildren, toChildren []Dirent, fromRev, toRev uint) error {
+func (s *Server) updateChildren(e *EditorWriter, dirPath, wirePath, selfPath string, fromChildren, toChildren []Dirent, fromRev, toRev uint) error {
 	fromByName := make(map[string]Dirent, len(fromChildren))
 	for _, entry := range fromChildren {
-		fromByName[childName(entry, dirPath)] = entry
+		fromByName[childName(entry, selfPath)] = entry
 	}
 	toByName := make(map[string]Dirent, len(toChildren))
 	for _, entry := range toChildren {
-		toByName[childName(entry, dirPath)] = entry
+		toByName[childName(entry, selfPath)] = entry
 	}
 
 	for name, from := range fromByName {
@@ -144,7 +147,7 @@ func (s *Server) updateChildren(e *EditorWriter, dirPath, wirePath string, fromC
 	}
 
 	for _, to := range toChildren {
-		name := childName(to, dirPath)
+		name := childName(to, selfPath)
 		if name == "" {
 			continue
 		}
@@ -169,16 +172,19 @@ func (s *Server) updateChildren(e *EditorWriter, dirPath, wirePath string, fromC
 			if err != nil {
 				return err
 			}
-			_, toGrandchildren := splitCheckoutEntries(toGrandEntries, childDirPath)
+			// to.Path (not a fresh self-lookup) is already this child's
+			// own true, repository-root-relative Path, per Server.List's
+			// contract -- reused directly as the next level's selfPath.
+			_, toGrandchildren := splitCheckoutEntries(toGrandEntries)
 			var fromGrandchildren []Dirent
 			if !isNew {
 				fromGrandEntries, err := s.listOrEmpty(childDirPath, fromRev)
 				if err != nil {
 					return err
 				}
-				_, fromGrandchildren = splitCheckoutEntries(fromGrandEntries, childDirPath)
+				_, fromGrandchildren = splitCheckoutEntries(fromGrandEntries)
 			}
-			if err := s.updateChildren(e, childDirPath, childWirePath, fromGrandchildren, toGrandchildren, fromRev, toRev); err != nil {
+			if err := s.updateChildren(e, childDirPath, childWirePath, to.Path, fromGrandchildren, toGrandchildren, fromRev, toRev); err != nil {
 				return err
 			}
 			if err := e.CloseDir(); err != nil {

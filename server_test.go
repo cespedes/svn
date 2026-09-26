@@ -345,3 +345,63 @@ func TestServerFinishReportErrorReadsAbortEditAck(t *testing.T) {
 	clientSide.Close()
 	<-serveErr
 }
+
+// TestServerGetIProps checks that "get-iprops" gets a real answer instead
+// of "Unknown command" (there is no Server callback field for it at all:
+// inherited properties aren't modeled anywhere in this package, so it
+// always reports none -- see the "get-iprops" case's own comment in
+// server.go), and that the response is shaped the same two-write way as
+// every other command here ("empty auth-request" pre-ack, then the real
+// answer): sending only one write for it (as an earlier version did)
+// leaves a real client waiting forever for the second, since nothing
+// else in the exchange would otherwise prompt Serve to send it.
+func TestServerGetIProps(t *testing.T) {
+	clientSide, serverSide := net.Pipe()
+	defer clientSide.Close()
+
+	var server Server
+
+	serveErr := make(chan error, 1)
+	go func() {
+		serveErr <- server.Serve(serverSide, serverSide)
+	}()
+
+	cc := conn{r: clientSide, w: clientSide}
+
+	var item Item
+	if err := cc.Read(&item); err != nil {
+		t.Fatalf("reading greeting: %v", err)
+	}
+	if err := cc.Write([]any{2, []any{}, []byte("svn://example.com/repo"), []byte("test-client"), []any{}}); err != nil {
+		t.Fatalf("sending greeting response: %v", err)
+	}
+	if err := cc.Read(&item); err != nil {
+		t.Fatalf("reading auth-request: %v", err)
+	}
+	if err := cc.Write([]any{"ANONYMOUS", []any{[]byte{}}}); err != nil {
+		t.Fatalf("sending auth-response: %v", err)
+	}
+	if err := cc.Read(&item); err != nil {
+		t.Fatalf("reading auth ack: %v", err)
+	}
+	if err := cc.Read(&item); err != nil {
+		t.Fatalf("reading repos-info: %v", err)
+	}
+
+	if err := cc.Write([]any{"get-iprops", []any{[]byte(""), []any{}}}); err != nil {
+		t.Fatalf("sending get-iprops: %v", err)
+	}
+	if err := cc.Read(&item); err != nil {
+		t.Fatalf("reading get-iprops pre-ack: %v", err)
+	}
+	var iprops struct{ Inherited []Item }
+	if err := cc.ReadResponse(&iprops); err != nil {
+		t.Fatalf("reading get-iprops response: %v", err)
+	}
+	if len(iprops.Inherited) != 0 {
+		t.Errorf("Inherited = %+v, want none", iprops.Inherited)
+	}
+
+	clientSide.Close()
+	<-serveErr
+}

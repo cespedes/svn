@@ -413,6 +413,38 @@ func (s *Server) Serve(r io.Reader, w io.Writer) error {
 			if err = conn.WriteSuccess([]any{kind}); err != nil {
 				return err
 			}
+		case "get-iprops":
+			// params: ( path:string [ rev:number ] )
+			// response: ( inherited-props:iproplist )
+			//
+			// Inherited properties (a path's ancestor directories'
+			// properties, e.g. svn:auto-props set higher up the tree)
+			// aren't modeled anywhere in this package -- List/GetFile
+			// have no notion of a directory's own properties at all --
+			// so this always reports none. Unlike every other command
+			// here, it isn't gated behind a nil-able callback field: a
+			// real client needs some answer to it to complete even a
+			// plain checkout of a path below the repository root
+			// (confirmed: it otherwise fails outright with "E210001:
+			// Unknown command 'get-iprops'", which is exactly how this
+			// case was found).
+			var args struct {
+				Path string
+				Rev  *uint
+			}
+			if err = Unmarshal(command.Params, &args); err != nil {
+				if err = conn.WriteFailure(neterr); err != nil {
+					return err
+				}
+				continue
+			}
+			// empty auth-request:
+			if err = conn.WriteSuccess([]any{[]any{}, []byte{}}); err != nil {
+				return err
+			}
+			if err = conn.WriteSuccess([]any{[]any{}}); err != nil {
+				return err
+			}
 		case "get-file":
 			// params: ( path:string [ rev:number ] want-props:bool want-contents:bool ? want-iprops:bool )
 			if s.GetFile == nil {

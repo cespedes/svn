@@ -51,6 +51,7 @@ of this same table):
 | Command a client sends | Handled? | Notes |
 | --- | --- | --- |
 | `get-latest-rev`, `stat`, `check-path`, `list`, `get-file`, `log` | ✅ | one callback field each; a `nil` field replies "unimplemented" |
+| `get-iprops` | ✅ | always reports no inherited properties (neither modeled anywhere in this package); not gated behind a callback field, since a real client needs an answer to it to complete even a plain checkout below the repository root |
 | `set-path`, `update`, `finish-report` | ✅ for a checkout or a single-revision update | `Serve` accumulates every `set-path` into a `[]ReportedPath` and hands it to `FinishReport`. `IsPlainCheckout` + `Server.CheckoutEdit` handle a plain checkout (the client has nothing yet), and `IsSingleRevisionUpdate` + `Server.UpdateEdit` handle a real `update` for a working copy that isn't "mixed revision" (every subtree at the same revision): it walks both the client's revision and the target revision via `List`/`GetFile` and describes only what changed -- new/removed/modified nodes -- skipping an unmodified file entirely. A mixed-revision working copy (part of it pinned to an older revision) isn't recognized by either helper |
 | everything else (`delete-path`/`link-path`, most of the editor command set beyond what a checkout/update needs, `commit`, locking, revision properties, `get-mergeinfo`, `get-file-revs`, `replay`, ...) | ❌ | not handled: replies "Unknown command" — see [PROTOCOL.md](PROTOCOL.md) for the full list |
 

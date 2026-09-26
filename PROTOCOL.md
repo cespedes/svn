@@ -45,7 +45,7 @@ These are the commands a client sends to ask the server to do something.
 | `replay` | ❌ | ❌ | |
 | `replay-range` | ❌ | ❌ | |
 | `get-deleted-rev` | ❌ | ❌ | |
-| `get-iprops` | ❌ | ❌ | inherited properties |
+| `get-iprops` | ❌ | ✅ | always reports no inherited properties -- neither `List` nor `GetFile` model a directory's own properties at all, so there's nothing to report. Unlike every other command, not gated behind a nil-able callback field: a real client sends this as part of *any* checkout/update below the repository root, and needs a real answer to complete it (confirmed: it otherwise fails outright with "Unknown command 'get-iprops'") |
 | `list` | ✅ | ✅ | `Client.List`; `server.go`'s `"list"` case. See `Server.List`'s doc comment for this command's real wire shape (leading `/`, full repository-root-relative path, self-entry) |
 
 ## Report Command Set

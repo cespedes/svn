@@ -447,6 +447,59 @@ func TestServerAgainstRealSVNClient(t *testing.T) {
 		}
 	})
 
+	// A checkout/update of a repository SUBDIRECTORY (as opposed to every
+	// other checkout/update subtest here, which connects at the
+	// repository root): this exercises two things neither of the above
+	// does. First, "get-iprops" -- a real client sends it as part of any
+	// checkout below the repository root, and previously got "E210001:
+	// Unknown command 'get-iprops'" outright, since it had no case in
+	// Serve's switch at all. Second, a real anchored session: fakeTree's
+	// own Dirent.Path values (built by resolve()+wirePath()) are always
+	// repository-root-relative, e.g. "/trunk/main.go", never anchor-
+	// relative -- confirmed against a real svnserve to always be this
+	// way -- so CheckoutEdit/UpdateEdit's own self-entry/child-name
+	// bookkeeping must not assume it can find the self-entry at
+	// "/" + whatever anchor-relative path was queried with (which is
+	// only ever "" for the report's own root): before both were fixed,
+	// this failed with "E210004: Malformed network data".
+	t.Run("checkout and update of a repository subdirectory", func(t *testing.T) {
+		dir := t.TempDir()
+		run("checkout", "-r", "1", "-q", repoURL+"trunk", dir)
+		mainGo, err := os.ReadFile(filepath.Join(dir, "main.go"))
+		if err != nil {
+			t.Fatalf("reading main.go: %v", err)
+		}
+		if string(mainGo) != "package main\n" {
+			t.Errorf("main.go content = %q, want %q", mainGo, "package main\n")
+		}
+		nested, err := os.ReadFile(filepath.Join(dir, "sub", "nested.txt"))
+		if err != nil {
+			t.Fatalf("reading sub/nested.txt: %v", err)
+		}
+		if string(nested) != "nested\n" {
+			t.Errorf("sub/nested.txt content = %q, want %q", nested, "nested\n")
+		}
+
+		run("update", "-q", dir)
+		mainGo, err = os.ReadFile(filepath.Join(dir, "main.go"))
+		if err != nil {
+			t.Fatalf("reading updated main.go: %v", err)
+		}
+		if want := "package main\n\nfunc main() {}\n"; string(mainGo) != want {
+			t.Errorf("updated main.go content = %q, want %q", mainGo, want)
+		}
+		if _, err := os.Stat(filepath.Join(dir, "sub")); err == nil {
+			t.Errorf("sub should have been removed by the update")
+		}
+		inside, err := os.ReadFile(filepath.Join(dir, "newdir", "inside.txt"))
+		if err != nil {
+			t.Fatalf("reading newdir/inside.txt: %v", err)
+		}
+		if string(inside) != "inside\n" {
+			t.Errorf("newdir/inside.txt content = %q, want %q", inside, "inside\n")
+		}
+	})
+
 	t.Run("log", func(t *testing.T) {
 		out := run("log", repoURL)
 		if !strings.Contains(out, "initial commit") {

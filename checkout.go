@@ -59,16 +59,18 @@ func (s *Server) CheckoutEdit(path string, rev uint) ([]Item, error) {
 	if err != nil {
 		return nil, err
 	}
-	self, children := splitCheckoutEntries(entries, path)
+	self, children := splitCheckoutEntries(entries)
 
 	e := NewEditorWriter()
 	if err := e.TargetRev(rev); err != nil {
 		return nil, err
 	}
 	var rootRev *uint
+	var selfPath string
 	if self != nil {
 		r := self.CreatedRev
 		rootRev = &r
+		selfPath = self.Path
 	}
 	if err := e.OpenRoot(rootRev); err != nil {
 		return nil, err
@@ -78,7 +80,7 @@ func (s *Server) CheckoutEdit(path string, rev uint) ([]Item, error) {
 			return nil, err
 		}
 	}
-	if err := s.checkoutAddChildren(e, path, "", children, rev); err != nil {
+	if err := s.checkoutAddChildren(e, path, "", selfPath, children, rev); err != nil {
 		return nil, err
 	}
 	if err := e.CloseDir(); err != nil {
@@ -87,31 +89,53 @@ func (s *Server) CheckoutEdit(path string, rev uint) ([]Item, error) {
 	return e.Items()
 }
 
-// splitCheckoutEntries separates a Server.List result (for dirPath) into
-// the queried directory's own entry (always present, per Server.List's
-// documented contract) and its direct children.
-func splitCheckoutEntries(entries []Dirent, dirPath string) (self *Dirent, children []Dirent) {
-	selfPath := "/" + dirPath
-	for _, entry := range entries {
-		if entry.Path == selfPath {
-			e := entry
-			self = &e
-			continue
+// splitCheckoutEntries separates a Server.List result into the queried
+// directory's own entry (always present, per Server.List's documented
+// contract) and its direct children. The self-entry is identified as the
+// one whose Path is the (necessarily unique) shortest among all the
+// entries, rather than assuming it equals "/" + whatever path was
+// queried with: Server.List's Dirent.Path is always the full,
+// repository-root-relative path (confirmed against a real svnserve),
+// which only coincides with "/" + the queried path when the session
+// isn't anchored below the repository root -- for an anchored session
+// (e.g. a checkout of ".../repo/trunk"), the queried path is
+// session-anchor-relative ("" for the checkout's own root) while every
+// Dirent.Path returned for it is still repository-root-relative
+// ("/trunk", "/trunk/main.go", ...), so the two only agree by
+// coincidence. Every child's Path is exactly the self-entry's own Path
+// plus "/" plus its own name, so the self-entry -- and only the
+// self-entry -- is a strict prefix of every other entry's Path, and so
+// has the shortest one (confirmed the hard way: an earlier version of
+// this comparison caused "E210004: Malformed network data" against a
+// real svn client checking out a repository subdirectory).
+func splitCheckoutEntries(entries []Dirent) (self *Dirent, children []Dirent) {
+	if len(entries) == 0 {
+		return nil, nil
+	}
+	selfIdx := 0
+	for i := 1; i < len(entries); i++ {
+		if len(entries[i].Path) < len(entries[selfIdx].Path) {
+			selfIdx = i
 		}
-		children = append(children, entry)
+	}
+	e := entries[selfIdx]
+	self = &e
+	for i, entry := range entries {
+		if i != selfIdx {
+			children = append(children, entry)
+		}
 	}
 	return self, children
 }
 
-// childName returns entry's name relative to dirPath (the directory it
-// was listed as a child of), by stripping dirPath's own "/" + prefix from
-// entry.Path -- the same convention svnfs.readDir relies on.
-func childName(entry Dirent, dirPath string) string {
-	name := strings.TrimPrefix(entry.Path, "/")
-	if dirPath != "" {
-		name = strings.TrimPrefix(name, dirPath+"/")
-	}
-	return name
+// childName returns entry's name relative to selfPath (the Path of the
+// directory it was listed as a child of, from splitCheckoutEntries),
+// by stripping that exact prefix -- unlike the session-anchor-relative
+// path originally passed to Server.List, selfPath is guaranteed to be a
+// real, repository-root-relative prefix of every child's own Path.
+func childName(entry Dirent, selfPath string) string {
+	name := strings.TrimPrefix(entry.Path, selfPath)
+	return strings.TrimPrefix(name, "/")
 }
 
 // checkoutEmitEntryProps sets the svn:entry:* pseudo-properties a real
@@ -144,17 +168,18 @@ func (s *Server) checkoutEmitEntryProps(setProp func(name string, value []byte) 
 }
 
 // checkoutAddChildren adds every entry in children (the already-listed
-// direct children of dirPath) as a node under e's currently open
-// directory, recursing into subdirectories with a fresh Server.List call
-// each (to discover their own children -- a child's own metadata, unlike
-// its children's, is already in hand from the listing that produced it,
-// so describing the child itself costs no extra round trip). wirePath is
-// dirPath's equivalent relative to the edit's own root; see
-// EditorWriter's doc comment on why every Editor Command Set path must
-// be in that form, not dirPath's own (session-anchor-relative) form.
-func (s *Server) checkoutAddChildren(e *EditorWriter, dirPath, wirePath string, children []Dirent, rev uint) error {
+// direct children of dirPath, whose own Path is selfPath) as a node
+// under e's currently open directory, recursing into subdirectories with
+// a fresh Server.List call each (to discover their own children -- a
+// child's own metadata, unlike its children's, is already in hand from
+// the listing that produced it, so describing the child itself costs no
+// extra round trip). wirePath is dirPath's equivalent relative to the
+// edit's own root; see EditorWriter's doc comment on why every Editor
+// Command Set path must be in that form, not dirPath's own
+// (session-anchor-relative) form.
+func (s *Server) checkoutAddChildren(e *EditorWriter, dirPath, wirePath, selfPath string, children []Dirent, rev uint) error {
 	for _, entry := range children {
-		name := childName(entry, dirPath)
+		name := childName(entry, selfPath)
 		if name == "" {
 			continue
 		}
@@ -177,8 +202,12 @@ func (s *Server) checkoutAddChildren(e *EditorWriter, dirPath, wirePath string, 
 			if err != nil {
 				return err
 			}
-			_, grandchildren := splitCheckoutEntries(grandEntries, childDirPath)
-			if err := s.checkoutAddChildren(e, childDirPath, childWirePath, grandchildren, rev); err != nil {
+			// entry.Path (not a fresh self-lookup) is already this
+			// child's own true, repository-root-relative Path, per
+			// Server.List's contract -- reused directly as the next
+			// level's selfPath.
+			_, grandchildren := splitCheckoutEntries(grandEntries)
+			if err := s.checkoutAddChildren(e, childDirPath, childWirePath, entry.Path, grandchildren, rev); err != nil {
 				return err
 			}
 			if err := e.CloseDir(); err != nil {
