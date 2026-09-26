@@ -48,12 +48,12 @@ of this same table):
 | Command a client sends | Handled? | Notes |
 | --- | --- | --- |
 | `get-latest-rev`, `stat`, `check-path`, `list`, `get-file`, `log` | ✅ | one callback field each; a `nil` field replies "unimplemented" |
-| `set-path`, `update`, `finish-report` | callbacks invoked, but incomplete | `Serve` accumulates every `set-path` into a `[]ReportedPath` and hands it to `FinishReport`, but there's still no typed way to write back the resulting editor command sequence (`open-root`, ..., `close-edit`): `FinishReport` must build it as raw `Item`s by hand |
-| everything else (`delete-path`/`link-path`, the editor command set, `commit`, locking, revision properties, `get-mergeinfo`, `get-file-revs`, `replay`, ...) | ❌ | not handled: replies "Unknown command" — see [PROTOCOL.md](PROTOCOL.md) for the full list |
+| `set-path`, `update`, `finish-report` | ✅ for a plain checkout | `Serve` accumulates every `set-path` into a `[]ReportedPath` and hands it to `FinishReport`; for the specific case a checkout's report always reduces to (the client has nothing yet), `IsPlainCheckout` + `Server.CheckoutEdit` build the resulting editor command sequence automatically, walking the target revision's tree via `List`/`GetFile`. A real `update` against an existing working copy needs actual tree-diffing logic this does not implement |
+| everything else (`delete-path`/`link-path`, most of the editor command set beyond what a checkout needs, `commit`, locking, revision properties, `get-mergeinfo`, `get-file-revs`, `replay`, ...) | ❌ | not handled: replies "Unknown command" — see [PROTOCOL.md](PROTOCOL.md) for the full list |
 
-In practice: a real `svn info`/`ls`/`cat`/`log` against a `svn.Server`
-implementation works (confirmed against a real `svn` client — see
-[Development](#development)); `svn checkout`/`update`/`commit` do not.
+In practice: a real `svn info`/`ls`/`cat`/`log`/`checkout` against a
+`svn.Server` implementation works (confirmed against a real `svn` client —
+see [Development](#development)); `svn update`/`switch`/`commit` do not.
 
 ## Installation
 

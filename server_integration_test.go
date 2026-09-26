@@ -10,7 +10,9 @@ import (
 	"io/fs"
 	"net"
 	"net/url"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -46,12 +48,15 @@ type fakeNode struct {
 //
 //	README.md
 //	trunk/main.go
+//	trunk/sub/nested.txt
 func fakeTree() map[string]fakeNode {
 	return map[string]fakeNode{
-		"":              {kind: "dir"},
-		"README.md":     {kind: "file", content: "hello world\n"},
-		"trunk":         {kind: "dir"},
-		"trunk/main.go": {kind: "file", content: "package main\n"},
+		"":                     {kind: "dir"},
+		"README.md":            {kind: "file", content: "hello world\n"},
+		"trunk":                {kind: "dir"},
+		"trunk/main.go":        {kind: "file", content: "package main\n"},
+		"trunk/sub":            {kind: "dir"},
+		"trunk/sub/nested.txt": {kind: "file", content: "nested\n"},
 	}
 }
 
@@ -98,6 +103,10 @@ func newFakeServer() svn.Server {
 		}, nil
 	}
 	server.GetLatestRev = func() (int, error) { return 1, nil }
+	var updateRev *uint
+	server.Update = func(rev *uint, target string, recurse bool) {
+		updateRev = rev
+	}
 	server.Stat = func(path string, rev *uint) (svn.Dirent, error) {
 		n, ok := tree[resolve(path)]
 		if !ok {
@@ -107,6 +116,13 @@ func newFakeServer() svn.Server {
 			Kind: n.kind, Size: uint64(len(n.content)),
 			CreatedRev: 1, CreatedDate: "2024-01-01T00:00:00.000000Z", LastAuthor: "tester",
 		}, nil
+	}
+	server.CheckPath = func(path string, rev *uint) (string, error) {
+		n, ok := tree[resolve(path)]
+		if !ok {
+			return "none", nil
+		}
+		return n.kind, nil
 	}
 	// wirePath turns a tree key (bare, no leading slash; "" for the root)
 	// into the full, slash-prefixed, repository-root-relative form
@@ -178,6 +194,17 @@ func newFakeServer() svn.Server {
 			}
 		}
 		return []svn.LogEntry{entry}, nil
+	}
+	server.FinishReport = func(report []svn.ReportedPath) ([]svn.Item, error) {
+		if !svn.IsPlainCheckout(report) {
+			return nil, fmt.Errorf("fake server: only a plain checkout is supported, got %+v", report)
+		}
+		rev := updateRev
+		if rev == nil {
+			latest := uint(1)
+			rev = &latest
+		}
+		return server.CheckoutEdit(report[0].Path, *rev)
 	}
 	return server
 }
@@ -267,6 +294,50 @@ func TestServerAgainstRealSVNClient(t *testing.T) {
 		out := run("cat", repoURL+"README.md")
 		if out != "hello world\n" {
 			t.Errorf("cat output = %q, want %q", out, "hello world\n")
+		}
+	})
+
+	// A plain checkout: the client reports having nothing (a single
+	// "set-path" for the root, start-empty), so Server.FinishReport (see
+	// newFakeServer) answers via CheckoutEdit, which walks the whole tree
+	// and describes every node as newly added. This is the first
+	// end-to-end exercise of EditorWriter/CheckoutEdit against a real
+	// client, not just a hand-checked Item sequence.
+	t.Run("checkout", func(t *testing.T) {
+		dir := t.TempDir()
+		run("checkout", "-q", repoURL, dir)
+		readme, err := os.ReadFile(filepath.Join(dir, "README.md"))
+		if err != nil {
+			t.Fatalf("reading checked-out README.md: %v", err)
+		}
+		if string(readme) != "hello world\n" {
+			t.Errorf("README.md content = %q, want %q", readme, "hello world\n")
+		}
+		mainGo, err := os.ReadFile(filepath.Join(dir, "trunk", "main.go"))
+		if err != nil {
+			t.Fatalf("reading checked-out trunk/main.go: %v", err)
+		}
+		if string(mainGo) != "package main\n" {
+			t.Errorf("trunk/main.go content = %q, want %q", mainGo, "package main\n")
+		}
+		nested, err := os.ReadFile(filepath.Join(dir, "trunk", "sub", "nested.txt"))
+		if err != nil {
+			t.Fatalf("reading checked-out trunk/sub/nested.txt: %v", err)
+		}
+		if string(nested) != "nested\n" {
+			t.Errorf("trunk/sub/nested.txt content = %q, want %q", nested, "nested\n")
+		}
+		// A real svn client's local metadata database asserts on a
+		// missing svn:entry:committed-rev, aborting "checkout" outright
+		// -- so getting this far already proves CheckoutEdit sent it (see
+		// checkoutEmitEntryProps). This additionally confirms the values
+		// came through correctly, by checking what "svn info" reports.
+		info := run("info", dir)
+		if !strings.Contains(info, "Revision: 1") {
+			t.Errorf("info output missing revision:\n%s", info)
+		}
+		if !strings.Contains(info, "Last Changed Author: tester") {
+			t.Errorf("info output missing author:\n%s", info)
 		}
 	})
 

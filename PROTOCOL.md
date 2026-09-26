@@ -28,8 +28,8 @@ These are the commands a client sends to ask the server to do something.
 | `check-path` | ❌ | ✅ | `Server.CheckPath` callback exists and is wired up, but `Client` has no method to send this command |
 | `stat` | ✅ | ✅ | `Client.Stat`; `server.go`'s `"stat"` case. See the README's note on this command's real, twice-nested wire shape |
 | `get-mergeinfo` | ❌ | ❌ | |
-| `update` | ❌ | ⚠️ | `Server.Update` callback is invoked with the parsed arguments, but it has no return value and the report/editor exchange that would drive an actual update isn't implemented, so nothing meaningful can happen as a result; `Client` has no method to send this at all |
-| `switch` | ❌ | ❌ | needs the same report/editor exchange as `update` |
+| `update` | ❌ | ⚠️ for a plain checkout | `Server.Update` callback is invoked with the parsed arguments and has no return value, but the report/editor exchange that follows (`set-path`, ..., `finish-report`) now drives a real, working "svn checkout" -- see the Report/Editor Command Set sections below. A real `update` against an existing working copy still needs tree-diffing logic that isn't implemented; `Client` has no method to send this command at all |
+| `switch` | ❌ | ❌ | needs the same report/editor exchange as `update`, plus tree-diffing |
 | `status` | ❌ | ❌ | note: this is the wire command a real client uses to compute local status, unrelated to this package's own `Server` type name |
 | `diff` | ❌ | ❌ | |
 | `log` | ✅ | ✅ | `Client.Log`; `server.go`'s `"log"` case |
@@ -61,7 +61,7 @@ reach `finish-report`.
 | `set-path` | ❌ | ⚠️ | `Serve` accumulates every `set-path` call into a `[]ReportedPath`, passed to `FinishReport` once the report ends; `Server.SetPath` itself is optional and purely informational (e.g. logging) -- it does not need to be set for the accumulation to happen |
 | `delete-path` | ❌ | ❌ | no case in `server.go`'s switch: replies "Unknown command"; not yet folded into `ReportedPath` accumulation |
 | `link-path` | ❌ | ❌ | same |
-| `finish-report` | ❌ | ⚠️ | `Server.FinishReport` callback receives the accumulated `[]ReportedPath` and its returned `[]Item` is written to the wire followed by `close-edit` (or `abort-edit` on error) — but constructing a correct Editor Command Set sequence by hand, as raw `Item`s, is still the caller's job entirely; nothing in this package helps build one |
+| `finish-report` | ❌ | ✅ for a plain checkout | `Server.FinishReport` callback receives the accumulated `[]ReportedPath`; for the shape `IsPlainCheckout` recognizes, `Server.CheckoutEdit` builds the resulting `[]Item` automatically (see the Editor Command Set section below) -- anything else still needs a caller-supplied `EditorWriter` sequence, since there's no tree-diffing logic in this package |
 | `abort-report` | ❌ | ❌ | no case in `server.go`'s switch |
 
 ## Editor Command Set
@@ -73,11 +73,17 @@ direction PARSES any of these (nothing in this package reads an Editor
 Command Set sequence sent to it); generating the server → client
 direction is what `EditorWriter` (`editor.go`) is for -- one typed method
 per command below, building up the `[]Item` a `Server.FinishReport`
-implementation can return -- but it isn't wired into `Serve` yet: nothing
-calls it automatically, and there is still no way to drive an actual
-`update`/`switch`/`checkout` end to end. `close-edit`/`abort-edit`
-specifically are always sent automatically by `server.go` itself (not via
-`EditorWriter`) to end the exchange once `FinishReport` returns.
+implementation can return. For the specific case a checkout's report
+always reduces to, `Server.CheckoutEdit` (`checkout.go`) drives
+`EditorWriter` automatically, walking the target revision's tree via
+`List`/`GetFile` and describing every node as newly added -- confirmed
+end to end against a real `svn checkout` (`TestServerAgainstRealSVNClient`
+in `server_integration_test.go`). Anything else (a real `update`/`switch`
+against something the client already has) still needs a caller to drive
+`EditorWriter` itself, since there is no tree-diffing logic in this
+package. `close-edit`/`abort-edit` specifically are always sent
+automatically by `server.go` itself (not via `EditorWriter`) to end the
+exchange once `FinishReport` returns.
 
 | Command | Client | Server |
 | --- | --- | --- |
