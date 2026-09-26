@@ -60,6 +60,29 @@ err := server.Serve(os.Stdin, os.Stdout)
 
 See [`examples/server`](examples/server) for a runnable version of this.
 
+## svnfs: an io/fs.FS adapter
+
+The [`svnfs`](svnfs) subpackage adapts a `*svn.Client` into a read-only
+[`io/fs.FS`](https://pkg.go.dev/io/fs#FS), so standard-library tools
+(`http.FileServerFS`, `fs.WalkDir`, `fs.Glob`, ...) can browse and read files
+straight out of an SVN repository:
+
+```go
+c, err := svn.Connect("svn+ssh://example.com/repo")
+if err != nil {
+	log.Fatal(err)
+}
+fsys := svnfs.New(c, nil) // nil rev: always the latest revision
+
+http.Handle("/", http.FileServerFS(fsys))
+```
+
+A `svn.Client` serializes one request at a time over a single connection and
+has no locking of its own, so an `FS` is only as safe for concurrent use as
+the `Client` behind it -- share one per goroutine, or serialize access with
+a mutex or a connection pool, rather than sharing one `Client` across
+concurrent requests directly.
+
 ## Command-line client: go-svn
 
 `cmd/go-svn` is a small `svn`-like command-line client built on top of this
