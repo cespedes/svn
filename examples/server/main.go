@@ -1,6 +1,7 @@
 package main
 
 import (
+	"io"
 	"log"
 	"os"
 
@@ -23,7 +24,7 @@ func main() {
 		return "dir", nil
 	}
 	err := server.Serve(os.Stdin, os.Stdout)
-	if err != nil {
+	if err != io.EOF {
 		log.Fatal(err)
 	}
 }
