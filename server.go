@@ -2,8 +2,10 @@ package svn
 
 import (
 	"crypto/md5"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 )
 
 // A Server defines parameters for running a SVN server.
@@ -31,7 +33,10 @@ type Server struct {
 	GetLatestRev func() (int, error)
 
 	// Stat answers a "stat" command, returning the status of path at rev
-	// (or at the latest revision, if rev is nil).
+	// (or at the latest revision, if rev is nil). If path does not exist,
+	// Stat should return an error satisfying errors.Is(err, fs.ErrNotExist);
+	// Serve reports that to the client as a real svnserve does (a
+	// successful response with no entry), rather than as a failure.
 	Stat func(path string, rev *uint) (Dirent, error)
 
 	// CheckPath answers a "check-path" command, returning the node kind
@@ -85,7 +90,8 @@ type Server struct {
 // issuing calls to the respective functions when a message
 // is received.
 //
-// Serve returns if there is an error, or after the end of the connection.
+// Serve always returns a non-nil error: [io.EOF] once the connection ends
+// cleanly, or another error otherwise.
 func (s *Server) Serve(r io.Reader, w io.Writer) error {
 	conn := conn{
 		r: r,
@@ -242,6 +248,21 @@ func (s *Server) Serve(r io.Reader, w io.Writer) error {
 			}
 			entry, err := s.Stat(args.Path, args.Rev)
 			if err != nil {
+				if errors.Is(err, fs.ErrNotExist) {
+					// A real svnserve reports a nonexistent path as a
+					// successful response with an empty (? entry:dirent),
+					// not a failure -- see the WriteSuccess below. Stat
+					// callbacks signal this the same way [Client.Stat]
+					// itself does: by returning an error satisfying
+					// errors.Is(err, fs.ErrNotExist).
+					if err = conn.WriteSuccess([]any{[]any{}, []byte{}}); err != nil {
+						return err
+					}
+					if err = conn.WriteSuccess([]any{}); err != nil {
+						return err
+					}
+					continue
+				}
 				if err = conn.WriteFailure(err); err != nil {
 					return err
 				}
