@@ -38,7 +38,8 @@ type Server struct {
 	// (or at the latest revision, if rev is nil). If path does not exist,
 	// Stat should return an error satisfying errors.Is(err, fs.ErrNotExist);
 	// Serve reports that to the client as a real svnserve does (a
-	// successful response with no entry), rather than as a failure.
+	// successful response whose single entry slot is an empty list),
+	// rather than as a failure.
 	Stat func(path string, rev *uint) (Dirent, error)
 
 	// CheckPath answers a "check-path" command, returning the node kind
@@ -259,15 +260,21 @@ func (s *Server) Serve(r io.Reader, w io.Writer) error {
 			if err != nil {
 				if errors.Is(err, fs.ErrNotExist) {
 					// A real svnserve reports a nonexistent path as a
-					// successful response with an empty (? entry:dirent),
-					// not a failure -- see the WriteSuccess below. Stat
-					// callbacks signal this the same way [Client.Stat]
-					// itself does: by returning an error satisfying
+					// successful response, not a failure -- Stat callbacks
+					// signal this the same way [Client.Stat] itself does,
+					// by returning an error satisfying
 					// errors.Is(err, fs.ErrNotExist).
 					if err = conn.WriteSuccess([]any{[]any{}, []byte{}}); err != nil {
 						return err
 					}
-					if err = conn.WriteSuccess([]any{}); err != nil {
+					// response: ( ? entry:dirent ). The tuple always has
+					// exactly one slot; an absent optional is that slot
+					// holding an empty list ( ( ) ), not the tuple itself
+					// having zero elements ( ) -- confirmed against a real
+					// svn client, which rejects the latter as malformed
+					// (see TestServerAgainstRealSVNClient's "info on
+					// nonexistent path" subtest).
+					if err = conn.WriteSuccess([]any{[]any{}}); err != nil {
 						return err
 					}
 					continue

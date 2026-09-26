@@ -90,8 +90,13 @@ func TestClientStatNoEntryReturnsError(t *testing.T) {
 			done <- err
 			return
 		}
-		// No entry: the path does not exist.
-		if err := sc.WriteSuccess([]any{}); err != nil {
+		// No entry: the path does not exist. The tuple always has exactly
+		// one slot; an absent optional is that slot holding an empty
+		// list, not the tuple itself having zero elements -- confirmed
+		// against a real svn client, which rejects the latter as
+		// malformed (see TestServerAgainstRealSVNClient's "info on
+		// nonexistent path" subtest, in server_integration_test.go).
+		if err := sc.WriteSuccess([]any{[]any{}}); err != nil {
 			done <- err
 			return
 		}
@@ -503,9 +508,10 @@ func TestClientNoReconnectOnApplicationError(t *testing.T) {
 			done <- err
 			return
 		}
-		// Empty response: Stat's own "not found" shape, not a broken
-		// connection.
-		if err := sc.WriteSuccess([]any{}); err != nil {
+		// Stat's own "not found" shape (a one-element tuple holding an
+		// empty list, not a zero-element tuple -- see the note in
+		// TestClientStatNoEntryReturnsError), not a broken connection.
+		if err := sc.WriteSuccess([]any{[]any{}}); err != nil {
 			done <- err
 			return
 		}

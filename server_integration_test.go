@@ -238,4 +238,23 @@ func TestServerAgainstRealSVNClient(t *testing.T) {
 			t.Errorf("log output missing author:\n%s", out)
 		}
 	})
+
+	// A real svn client rejects a "stat" response shaped as a zero-element
+	// tuple (the outer "( )") with "E210004: Malformed network data",
+	// instead of reporting the path as missing: the tuple must always
+	// have exactly one slot, itself holding an empty list when the entry
+	// is absent. Confirmed by temporarily reverting server.go's "stat" 404
+	// case to the zero-element shape and seeing this exact error appear.
+	t.Run("info on nonexistent path", func(t *testing.T) {
+		out, err := runSVN(t, "--non-interactive", "info", repoURL+"does-not-exist")
+		if err == nil {
+			t.Fatalf("expected an error, got none; output:\n%s", out)
+		}
+		if strings.Contains(out, "Malformed network data") {
+			t.Fatalf("real svn client rejected the response as malformed:\n%s", out)
+		}
+		if !strings.Contains(out, "non-existent") {
+			t.Errorf("expected a \"non-existent\" error, got:\n%s", out)
+		}
+	})
 }
