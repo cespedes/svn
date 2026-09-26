@@ -25,14 +25,21 @@ func ParseResponse(i Item) (Item, error) {
 	case "success":
 		return resp.Params, nil
 	case "failure":
-		var errResp struct {
-			Err Error
-		}
-		err = Unmarshal(resp.Params, &errResp)
-		if err != nil {
+		// failure params are "( err:error ... )": a list of one or more
+		// error tuples. This package's Error only models a single error,
+		// so take the first one. (A previous version of this code
+		// unmarshaled straight into a one-field "struct{ Err Error }"
+		// wrapper, which -- because of how Unmarshal special-cases a
+		// struct with a single struct-typed field -- only ever filled
+		// Err.AprErr, leaving Message/File/Line silently empty.)
+		var errs []Error
+		if err = Unmarshal(resp.Params, &errs); err != nil {
 			return Item{}, err
 		}
-		return Item{}, errResp.Err
+		if len(errs) == 0 {
+			return Item{}, fmt.Errorf("syntax error: failure response with no error object")
+		}
+		return Item{}, errs[0]
 	default:
 		return Item{}, fmt.Errorf("syntax error: response must be `success` or `failure`")
 	}
