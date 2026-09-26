@@ -58,10 +58,10 @@ reach `finish-report`.
 
 | Command | Client | Server | Notes |
 | --- | --- | --- | --- |
-| `set-path` | ❌ | ⚠️ | `Server.SetPath` callback is invoked, but see `update`'s note above: there's no way to act on it meaningfully yet |
-| `delete-path` | ❌ | ❌ | no case in `server.go`'s switch: replies "Unknown command" |
+| `set-path` | ❌ | ⚠️ | `Serve` accumulates every `set-path` call into a `[]ReportedPath`, passed to `FinishReport` once the report ends; `Server.SetPath` itself is optional and purely informational (e.g. logging) -- it does not need to be set for the accumulation to happen |
+| `delete-path` | ❌ | ❌ | no case in `server.go`'s switch: replies "Unknown command"; not yet folded into `ReportedPath` accumulation |
 | `link-path` | ❌ | ❌ | same |
-| `finish-report` | ❌ | ⚠️ | `Server.FinishReport` callback is invoked and its returned `[]Item` is written to the wire followed by `close-edit` (or `abort-edit` on error) — but constructing a correct Editor Command Set sequence by hand, as raw `Item`s, is the caller's job entirely; nothing in this package helps build one |
+| `finish-report` | ❌ | ⚠️ | `Server.FinishReport` callback receives the accumulated `[]ReportedPath` and its returned `[]Item` is written to the wire followed by `close-edit` (or `abort-edit` on error) — but constructing a correct Editor Command Set sequence by hand, as raw `Item`s, is still the caller's job entirely; nothing in this package helps build one |
 | `abort-report` | ❌ | ❌ | no case in `server.go`'s switch |
 
 ## Editor Command Set

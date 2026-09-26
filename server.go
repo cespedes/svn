@@ -8,6 +8,23 @@ import (
 	"io/fs"
 )
 
+// ReportedPath is one entry from a client's report describing what it
+// already has, driving an "update" (or, eventually, "switch"/"status"/
+// "diff"): the accumulated result of one "set-path" command. A future
+// "delete-path"/"link-path" command would add further entries here, once
+// those are implemented -- see FinishReport.
+type ReportedPath struct {
+	// Path is the reported path, relative to the report's target (the
+	// path Update was called with).
+	Path string
+	// Rev is the revision the client already has at Path.
+	Rev uint
+	// StartEmpty reports whether the client has nothing at all at Path
+	// (e.g. because it is a brand new checkout), rather than a real,
+	// possibly-stale copy at Rev.
+	StartEmpty bool
+}
+
 // A Server defines parameters for running a SVN server.
 //
 // Each exported func field is a callback invoked when Serve receives the
@@ -82,24 +99,27 @@ type Server struct {
 	// within the repository, and whether the update should recurse.
 	// It has no return value because the protocol does not reply to
 	// "update" beyond an initial acknowledgement: the actual result is
-	// meant to be driven by the report commands that follow (SetPath,
-	// ..., FinishReport), which is not implemented yet -- so Update
-	// currently has no way to affect what, if anything, gets sent back.
+	// driven by the report commands that follow (set-path, ...,
+	// finish-report), which Serve accumulates on the caller's behalf and
+	// hands to FinishReport -- see FinishReport.
 	Update func(rev *uint, target string, recurse bool)
 
 	// SetPath is called for a "set-path" command, part of the report
 	// mechanism a client uses to describe what it already has before an
-	// update. As with Update, there is no way to report a result back
-	// from here yet: driving the resulting editor sequence is done in
-	// FinishReport.
+	// update. It is purely informational: Serve records every set-path
+	// call itself (see FinishReport) whether or not SetPath is set, so
+	// leaving it nil does not lose any information -- set it only to
+	// observe each call as it happens (e.g. logging).
 	SetPath func(path string, rev uint, startEmpty bool)
 
 	// FinishReport answers a "finish-report" command, which ends a report
-	// and should drive an editor command sequence (open-root, ...,
-	// close-edit) back to the client. It must return the sequence of
-	// editor commands as Items, or an error to send an "abort-edit"
-	// instead.
-	FinishReport func() ([]Item, error)
+	// describing what the client already has (accumulated, in the order
+	// the client sent them, from every "set-path" command since the
+	// preceding "update") and should drive an editor command sequence
+	// (open-root, ..., close-edit) back to the client. It must return the
+	// sequence of editor commands as Items, or an error to send an
+	// "abort-edit" instead.
+	FinishReport func(paths []ReportedPath) ([]Item, error)
 }
 
 // Serve sends and receives SVN messages against a client,
@@ -116,6 +136,9 @@ func (s *Server) Serve(r io.Reader, w io.Writer) error {
 
 	var err error
 	var item Item
+	// report accumulates the current update/switch report's entries,
+	// between an "update" and its "finish-report"; see ReportedPath.
+	var report []ReportedPath
 
 	err = conn.WriteSuccess([]any{
 		SvnVersion,
@@ -537,12 +560,6 @@ func (s *Server) Serve(r io.Reader, w io.Writer) error {
 				return err
 			}
 		case "set-path": // From the Report Command Set
-			if s.SetPath == nil {
-				if err = replyUnimplemented(conn, command.Name); err != nil {
-					return err
-				}
-				continue
-			}
 			var args struct {
 				Path       string
 				Rev        uint
@@ -554,10 +571,16 @@ func (s *Server) Serve(r io.Reader, w io.Writer) error {
 				}
 				continue
 			}
-			s.SetPath(args.Path, args.Rev, args.StartEmpty)
+			report = append(report, ReportedPath{
+				Path: args.Path, Rev: args.Rev, StartEmpty: args.StartEmpty,
+			})
+			if s.SetPath != nil {
+				s.SetPath(args.Path, args.Rev, args.StartEmpty)
+			}
 			// no response in set-path
 		case "finish-report": // From the Report Command Set
 			if s.FinishReport == nil {
+				report = nil
 				if err = replyUnimplemented(conn, command.Name); err != nil {
 					return err
 				}
@@ -567,7 +590,8 @@ func (s *Server) Serve(r io.Reader, w io.Writer) error {
 			if err = conn.WriteSuccess([]any{[]any{}, []byte{}}); err != nil {
 				return err
 			}
-			items, err := s.FinishReport()
+			items, err := s.FinishReport(report)
+			report = nil
 			if err != nil {
 				if err = conn.Write([]any{"abort-edit", []any{}}); err != nil {
 					return err

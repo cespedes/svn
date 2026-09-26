@@ -48,8 +48,8 @@ of this same table):
 | Command a client sends | Handled? | Notes |
 | --- | --- | --- |
 | `get-latest-rev`, `stat`, `check-path`, `list`, `get-file`, `log` | ✅ | one callback field each; a `nil` field replies "unimplemented" |
-| `set-path`, `update` | callbacks invoked, but incomplete | called with the parsed arguments, but there's no way to report back a result: driving the actual update requires the report/editor command sequence below, which isn't implemented |
-| everything else (the rest of the report/editor command sets, `commit`, locking, revision properties, `get-mergeinfo`, `get-file-revs`, `replay`, ...) | ❌ | not handled: replies "Unknown command" — see [PROTOCOL.md](PROTOCOL.md) for the full list |
+| `set-path`, `update`, `finish-report` | callbacks invoked, but incomplete | `Serve` accumulates every `set-path` into a `[]ReportedPath` and hands it to `FinishReport`, but there's still no typed way to write back the resulting editor command sequence (`open-root`, ..., `close-edit`): `FinishReport` must build it as raw `Item`s by hand |
+| everything else (`delete-path`/`link-path`, the editor command set, `commit`, locking, revision properties, `get-mergeinfo`, `get-file-revs`, `replay`, ...) | ❌ | not handled: replies "Unknown command" — see [PROTOCOL.md](PROTOCOL.md) for the full list |
 
 In practice: a real `svn info`/`ls`/`cat`/`log` against a `svn.Server`
 implementation works (confirmed against a real `svn` client — see

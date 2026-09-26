@@ -138,3 +138,110 @@ func TestServerUpdateAndSetPathInvokeCallbacks(t *testing.T) {
 	clientSide.Close()
 	<-serveErr
 }
+
+// TestServerFinishReportReceivesReportedPaths checks that Serve accumulates
+// every "set-path" command into a []ReportedPath and passes it to
+// Server.FinishReport, in the order the client sent them -- and that this
+// accumulation happens even though Server.SetPath itself is left nil here,
+// since it is meant to be purely an optional, informational callback.
+func TestServerFinishReportReceivesReportedPaths(t *testing.T) {
+	clientSide, serverSide := net.Pipe()
+	defer clientSide.Close()
+
+	var gotReport []ReportedPath
+	var server Server
+	server.FinishReport = func(report []ReportedPath) ([]Item, error) {
+		gotReport = report
+		return nil, nil
+	}
+
+	serveErr := make(chan error, 1)
+	go func() {
+		serveErr <- server.Serve(serverSide, serverSide)
+	}()
+
+	cc := conn{r: clientSide, w: clientSide}
+
+	// Greeting: read the server's, send ours.
+	var item Item
+	if err := cc.Read(&item); err != nil {
+		t.Fatalf("reading greeting: %v", err)
+	}
+	if err := cc.Write([]any{2, []any{}, []byte("svn://example.com/repo"), []byte("test-client"), []any{}}); err != nil {
+		t.Fatalf("sending greeting response: %v", err)
+	}
+
+	// Auth: read the auth-request, send an auth-response, read the ack and
+	// the repos-info that follows it.
+	if err := cc.Read(&item); err != nil {
+		t.Fatalf("reading auth-request: %v", err)
+	}
+	if err := cc.Write([]any{"ANONYMOUS", []any{[]byte{}}}); err != nil {
+		t.Fatalf("sending auth-response: %v", err)
+	}
+	if err := cc.Read(&item); err != nil {
+		t.Fatalf("reading auth ack: %v", err)
+	}
+	if err := cc.Read(&item); err != nil {
+		t.Fatalf("reading repos-info: %v", err)
+	}
+
+	// Two "set-path" commands, as a real checkout sends for the report
+	// root (start-empty, since it has nothing) plus one already-present
+	// subdirectory, then "finish-report" to end the exchange.
+	if err := cc.Write([]any{"set-path", []any{
+		[]byte(""),
+		uint(5),
+		true,
+	}}); err != nil {
+		t.Fatalf("sending first set-path: %v", err)
+	}
+	if err := cc.Write([]any{"set-path", []any{
+		[]byte("sub"),
+		uint(5),
+		false,
+	}}); err != nil {
+		t.Fatalf("sending second set-path: %v", err)
+	}
+	if err := cc.Write([]any{"finish-report", []any{}}); err != nil {
+		t.Fatalf("sending finish-report: %v", err)
+	}
+
+	// finish-report's own two-part response: an immediate empty
+	// auth-request-shaped ack, then (since FinishReport returned no
+	// items and no error) "close-edit" straight away.
+	if err := cc.Read(&item); err != nil {
+		t.Fatalf("reading finish-report ack: %v", err)
+	}
+	if err := cc.Read(&item); err != nil {
+		t.Fatalf("reading close-edit: %v", err)
+	}
+	if item.Type != ListType || len(item.List) != 2 || item.List[0].Text != "close-edit" {
+		t.Fatalf("got %s, want a close-edit command", item)
+	}
+	// Serve waits for a client response to close-edit before it can move
+	// on to whatever command comes next (there is none here, but Serve
+	// doesn't know that).
+	if err := cc.Write([]any{"success", []any{}}); err != nil {
+		t.Fatalf("acking close-edit: %v", err)
+	}
+	if err := cc.Read(&item); err != nil {
+		t.Fatalf("reading finish-report's final response: %v", err)
+	}
+
+	want := []ReportedPath{
+		{Path: "", Rev: 5, StartEmpty: true},
+		{Path: "sub", Rev: 5, StartEmpty: false},
+	}
+	if len(gotReport) != len(want) {
+		t.Fatalf("FinishReport got %+v, want %+v", gotReport, want)
+	}
+	for i := range want {
+		if gotReport[i] != want[i] {
+			t.Errorf("FinishReport report[%d] = %+v, want %+v", i, gotReport[i], want[i])
+		}
+	}
+
+	clientSide.Close()
+	<-serveErr
+}
