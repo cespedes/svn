@@ -305,3 +305,32 @@ func TestClientHandleAuthUsesOfferedMechanism(t *testing.T) {
 		t.Fatalf("fake server: %v", err)
 	}
 }
+
+// TestNewClient drives a full greeting/auth/repos-info handshake over an
+// in-memory connection, the way [Server.Serve] itself would answer it, and
+// checks NewClient completes it and fills in c.Info.
+func TestNewClient(t *testing.T) {
+	clientSide, serverSide := net.Pipe()
+	defer serverSide.Close()
+
+	done := make(chan error, 1)
+	go func() {
+		var server Server
+		server.GetLatestRev = func() (int, error) { return 0, nil }
+		done <- server.Serve(serverSide, serverSide)
+	}()
+
+	c, err := NewClient(clientSide, clientSide, "svn+ssh://example.com/repo")
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	if c.Info.URL != "svn+ssh://example.com/repo" {
+		t.Errorf("c.Info.URL = %q, want %q", c.Info.URL, "svn+ssh://example.com/repo")
+	}
+	if c.Info.UUID == "" {
+		t.Errorf("c.Info.UUID is empty")
+	}
+
+	clientSide.Close()
+	<-done
+}

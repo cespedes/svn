@@ -2,6 +2,8 @@ package svn
 
 import (
 	"fmt"
+	"io"
+	"io/fs"
 	"net/url"
 	"os/exec"
 )
@@ -68,47 +70,72 @@ func Connect(address string) (*Client, error) {
 		return nil, fmt.Errorf("svn: connect to %q: scheme %q not implemented", address, u.Scheme)
 	}
 
-	err = c.exec(execArgs[0], execArgs[1:]...)
-	if err != nil {
+	if err := c.exec(execArgs[0], execArgs[1:]...); err != nil {
 		return nil, err
 	}
 
+	if err := c.handshake(u.String()); err != nil {
+		return nil, err
+	}
+
+	return &c, nil
+}
+
+// NewClient returns a [Client] that speaks the protocol over r and w,
+// performing the same greeting/version-negotiation/auth handshake as
+// [Connect], without spawning any subprocess. address identifies the
+// repository (or a path within it) being requested, exactly as it would be
+// given to Connect.
+//
+// This lets a caller supply its own transport: a connection dialed by
+// hand, an in-memory pipe for testing, or (once this package supports
+// svn:// directly) a raw TCP connection.
+func NewClient(r io.Reader, w io.Writer, address string) (*Client, error) {
+	c := &Client{conn: conn{r: r, w: w}}
+	if err := c.handshake(address); err != nil {
+		return nil, err
+	}
+	return c, nil
+}
+
+// handshake performs the greeting, version negotiation, auth and
+// repos-info exchange that both Connect and NewClient need, once their
+// underlying connection is established.
+func (c *Client) handshake(address string) error {
 	var greet struct {
 		MinVer       int
 		MaxVer       int
 		Mechs        Item
 		Capabilities []string
 	}
-	err = c.conn.ReadResponse(&greet)
+	err := c.conn.ReadResponse(&greet)
 	if err != nil {
-		return nil, fmt.Errorf("reading greeting: %w", err)
+		return fmt.Errorf("reading greeting: %w", err)
 	}
 	if greet.MinVer > SvnVersion || greet.MaxVer < SvnVersion {
-		return nil, fmt.Errorf("client: unsupported SVN version range (%d .. %d)", greet.MinVer, greet.MaxVer)
+		return fmt.Errorf("client: unsupported SVN version range (%d .. %d)", greet.MinVer, greet.MaxVer)
 	}
 	err = c.conn.Write([]any{
 		SvnVersion,
 		//[]string{"edit-pipeline", "svndiff1", "accepts-svndiff2", "absent-entries", "depth", "mergeinfo", "log-revprops"},
 		[]string{"edit-pipeline"},
-		[]byte(u.String()),
+		[]byte(address),
 		[]byte(SvnClient),
 		[]any{},
 	})
 	if err != nil {
-		return nil, fmt.Errorf("client: sending greeting response: %w", err)
+		return fmt.Errorf("client: sending greeting response: %w", err)
 	}
 
-	err = c.handleAuth()
-	if err != nil {
-		return nil, err
+	if err := c.handleAuth(); err != nil {
+		return err
 	}
 
-	err = c.conn.ReadResponse(&c.Info)
-	if err != nil {
-		return nil, fmt.Errorf("reading repos-info: %w", err)
+	if err := c.conn.ReadResponse(&c.Info); err != nil {
+		return fmt.Errorf("reading repos-info: %w", err)
 	}
 
-	return &c, nil
+	return nil
 }
 
 func (c *Client) exec(name string, arg ...string) error {
@@ -205,8 +232,8 @@ func (c *Client) GetLatestRev() (int, error) {
 }
 
 // Stat sends a "stat" command, asking for the status of path at rev, or at
-// the latest revision if rev is nil. It returns an error if path does not
-// exist at that revision.
+// the latest revision if rev is nil. If path does not exist at that
+// revision, it returns an error satisfying errors.Is(err, fs.ErrNotExist).
 func (c *Client) Stat(path string, rev *int) (Stat, error) {
 	lrev := []int{}
 	if rev != nil {
@@ -228,7 +255,7 @@ func (c *Client) Stat(path string, rev *int) (Stat, error) {
 		return Stat{}, err
 	}
 	if len(raw.List) == 0 || len(raw.List[0].List) == 0 {
-		return Stat{}, fmt.Errorf("stat: %q: no such file or directory", path)
+		return Stat{}, fmt.Errorf("stat: %q: %w", path, fs.ErrNotExist)
 	}
 	var stat Stat
 	if err := Unmarshal(raw.List[0].List[0], &stat); err != nil {
