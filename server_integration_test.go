@@ -108,6 +108,12 @@ func newFakeServer() svn.Server {
 			CreatedRev: 1, CreatedDate: "2024-01-01T00:00:00.000000Z", LastAuthor: "tester",
 		}, nil
 	}
+	// wirePath turns a tree key (bare, no leading slash; "" for the root)
+	// into the full, slash-prefixed, repository-root-relative form
+	// Server.List now requires of every Dirent.Path.
+	wirePath := func(p string) string {
+		return "/" + p
+	}
 	server.List = func(path string, rev *uint, depth string, fields, pattern []string) ([]svn.Dirent, error) {
 		full := resolve(path)
 		n, ok := tree[full]
@@ -118,19 +124,22 @@ func newFakeServer() svn.Server {
 		if prefix != "" {
 			prefix += "/"
 		}
-		var out []svn.Dirent
+		// The queried directory itself is always included as one of the
+		// entries, matching a real svnserve.
+		out := []svn.Dirent{{
+			Path: wirePath(full), Kind: "dir",
+			CreatedRev: 1, CreatedDate: "2024-01-01T00:00:00.000000Z", LastAuthor: "tester",
+		}}
 		for p, e := range tree {
-			if p == full {
+			if p == full || !strings.HasPrefix(p, prefix) {
 				continue
 			}
 			rest := strings.TrimPrefix(p, prefix)
 			if rest == "" || strings.Contains(rest, "/") {
 				continue // not a direct child of full
 			}
-			// Just the base name: Serve rebuilds the full wire path
-			// itself (see Server.List's doc comment).
 			out = append(out, svn.Dirent{
-				Path: rest, Kind: e.kind, Size: uint64(len(e.content)),
+				Path: wirePath(p), Kind: e.kind, Size: uint64(len(e.content)),
 				CreatedRev: 1, CreatedDate: "2024-01-01T00:00:00.000000Z", LastAuthor: "tester",
 			})
 		}
@@ -219,6 +228,20 @@ func TestServerAgainstRealSVNClient(t *testing.T) {
 		}
 		if !strings.Contains(out, "trunk/") {
 			t.Errorf("ls output missing trunk/:\n%s", out)
+		}
+	})
+
+	// A session anchored below the repository root (connecting directly
+	// to ".../trunk", as opposed to the root URL every other subtest
+	// uses) sends "list" paths relative to that anchor, not to the
+	// repository root -- this is what previously broke Server.List's
+	// path reconstruction, since Serve had no way to know about the
+	// anchor and rebuilt each entry's path as if "path" were already
+	// repository-root-relative.
+	t.Run("ls in a session anchored below the root", func(t *testing.T) {
+		out := run("ls", repoURL+"trunk")
+		if !strings.Contains(out, "main.go") {
+			t.Errorf("ls output missing main.go:\n%s", out)
 		}
 	})
 

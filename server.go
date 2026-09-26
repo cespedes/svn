@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"path"
-	"strings"
 )
 
 // A Server defines parameters for running a SVN server.
@@ -48,17 +46,25 @@ type Server struct {
 	CheckPath func(path string, rev *uint) (string, error)
 
 	// List answers a "list" command, returning the direct children of
-	// path at rev. depth is one of the protocol's depth words (e.g.
-	// "immediates"), fields selects which optional Dirent fields the
-	// client wants populated, and pattern, if non-empty, restricts the
-	// result to entries matching one of the given glob patterns.
+	// path at rev, PLUS an entry for path itself. depth is one of the
+	// protocol's depth words (e.g. "immediates"), fields selects which
+	// optional Dirent fields the client wants populated, and pattern, if
+	// non-empty, restricts the result to entries matching one of the
+	// given glob patterns.
 	//
-	// Only each entry's own base name matters in its Dirent.Path (e.g.
-	// "main.go", not "trunk/main.go" or any server-specific prefix):
-	// Serve rebuilds the full wire path itself from path and that base
-	// name. A real svn client has been seen to segfault given a
-	// differently-shaped path here, so this is deliberately not left to
-	// each List implementation to get right.
+	// Each entry's Dirent.Path must be the full, slash-prefixed path from
+	// the repository root (e.g. "/trunk/main.go", not "main.go" or
+	// "trunk/main.go") -- confirmed against a real svnserve's own
+	// response, which always uses this form and always includes the
+	// queried directory itself as one of the entries (Path equal to path,
+	// prefixed the same way). Serve sends whatever Dirent.Path contains
+	// as-is: an earlier version of this field instead had Serve rebuild
+	// each path itself from a bare base name, which broke as soon as the
+	// client's session was anchored below the repository root (e.g. it
+	// connected directly to ".../repo/trunk"): path is then relative to
+	// that anchor, not to the repository root, so the rebuilt paths came
+	// out wrong -- and a real svn client has been seen to segfault on the
+	// resulting malformed "list" response.
 	List func(path string, rev *uint, depth string, fields []string, pattern []string) ([]Dirent, error)
 
 	// GetFile answers a "get-file" command, returning the revision the
@@ -334,20 +340,9 @@ func (s *Server) Serve(r io.Reader, w io.Writer) error {
 			if err = conn.WriteSuccess([]any{[]any{}, []byte{}}); err != nil {
 				return err
 			}
-			// The wire path for each entry is rebuilt here as "/" plus
-			// the queried directory plus the entry's own base name,
-			// rather than sent as whatever d.Path happens to contain:
-			// a real svnserve always sends that full, slash-prefixed
-			// form (confirmed against one), and at least one real svn
-			// client has been seen to segfault on a "list" response
-			// that instead uses a bare, unprefixed child name.
-			listPrefix := "/" + strings.TrimPrefix(args.Path, "/")
-			if listPrefix != "/" {
-				listPrefix += "/"
-			}
 			for _, d := range dirents {
 				if err = conn.Write([]any{
-					[]byte(listPrefix + path.Base(d.Path)),
+					[]byte(d.Path),
 					d.Kind,
 					[]any{d.Size},
 					[]any{d.HasProps},

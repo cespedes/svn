@@ -46,7 +46,7 @@ These are the commands a client sends to ask the server to do something.
 | `replay-range` | ❌ | ❌ | |
 | `get-deleted-rev` | ❌ | ❌ | |
 | `get-iprops` | ❌ | ❌ | inherited properties |
-| `list` | ✅ | ✅ | `Client.List`; `server.go`'s `"list"` case. See the README's note on this command's real wire shape (leading `/`, self-entry, base-name-only `Server.List` contract) |
+| `list` | ✅ | ✅ | `Client.List`; `server.go`'s `"list"` case. See `Server.List`'s doc comment for this command's real wire shape (leading `/`, full repository-root-relative path, self-entry) |
 
 ## Report Command Set
 
