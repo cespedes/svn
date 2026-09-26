@@ -116,6 +116,11 @@ go build ./...
 go test ./...
 ```
 
+If `svnadmin`, `svn` and `svnserve` are installed (e.g. Debian/Ubuntu's
+`subversion` package), `go test ./...` also runs a handful of integration
+tests against a real, temporary repository; they're skipped cleanly
+otherwise.
+
 ## License
 
 [MIT](LICENSE)

@@ -163,22 +163,28 @@ func (f *FS) readDir(name string) ([]fs.DirEntry, error) {
 	if err != nil {
 		return nil, err
 	}
+	// A real svnserve includes the queried directory itself as one of its
+	// own "children", with Path set to "/" + svnPath exactly (or just "/"
+	// at the root) -- not some other entry's parent-relative prefix, so
+	// this exact match is used to filter it out below, rather than a
+	// looser string comparison that a same-named child (e.g. "trunk"
+	// containing a child also named "trunk") could confuse.
+	selfPath := "/" + svnPath
+
 	entries := make([]fs.DirEntry, 0, len(dirents))
 	for _, d := range dirents {
-		// Some servers return a Dirent.Path already relative to svnPath
-		// (a bare child name); at least one real svnserve has been seen
-		// to return it prefixed with the full path we asked for instead
-		// (the same discrepancy cmd/go-svn's own "ls" subcommand works
-		// around). Strip the prefix if present, so either way we end up
-		// with a bare child name.
-		childName := d.Path
+		if d.Path == selfPath {
+			continue
+		}
+		// A Dirent.Path may come back as a bare child name, prefixed
+		// with the queried path, or (confirmed against a real svnserve)
+		// prefixed with "/" + the queried path. Strip whichever of these
+		// is present, so we always end up with a bare child name.
+		childName := strings.TrimPrefix(d.Path, "/")
 		if svnPath != "" {
 			childName = strings.TrimPrefix(childName, svnPath+"/")
 		}
-		childName = strings.TrimPrefix(childName, "/")
 		if childName == "" {
-			// The queried directory listing itself, if the server
-			// includes it: not one of its own children.
 			continue
 		}
 		info := newFileInfo(childName, d.Kind, d.Size, d.CreatedRev, d.CreatedDate)

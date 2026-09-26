@@ -116,13 +116,17 @@ func newTestFS(t *testing.T) *svnfs.FS {
 		if n == nil || n.kind != "dir" {
 			return nil, errors.New("not found")
 		}
-		var out []svn.Dirent
+		// A real svnserve returns each Path prefixed with "/" + the full
+		// queried path (not a bare child name), and includes the queried
+		// directory itself as one of its own "children" -- confirmed
+		// against a real server; svnfs.readDir must cope with both.
+		out := []svn.Dirent{
+			{Path: "/" + path, Kind: n.kind, Size: svnSize(n),
+				CreatedRev: n.rev, CreatedDate: n.date, LastAuthor: n.author},
+		}
 		for name, c := range n.children {
 			out = append(out, svn.Dirent{
-				// Prefixed with the queried path, not a bare child name:
-				// this is the real-world svnserve shape svnfs must cope
-				// with (see the same workaround in cmd/go-svn's "ls").
-				Path: joinSVNPath(path, name),
+				Path: "/" + joinSVNPath(path, name),
 				Kind: c.kind, Size: svnSize(c),
 				CreatedRev: c.rev, CreatedDate: c.date, LastAuthor: c.author,
 			})
