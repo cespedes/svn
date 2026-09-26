@@ -23,7 +23,9 @@ protocol, and the only auth mechanisms implemented are `ANONYMOUS` and
 either anonymous access or a transport that already authenticated the
 connection (e.g. `svn+ssh://`'s SSH layer).
 
-Concretely, this is what works and what doesn't, on each side:
+Concretely, this is what works and what doesn't, on each side (see
+[PROTOCOL.md](PROTOCOL.md) for the exhaustive, command-by-command version
+of this same table):
 
 ### Client (`svn.Client`, `go-svn`)
 
@@ -47,11 +49,7 @@ Concretely, this is what works and what doesn't, on each side:
 | --- | --- | --- |
 | `get-latest-rev`, `stat`, `check-path`, `list`, `get-file`, `log` | ✅ | one callback field each; a `nil` field replies "unimplemented" |
 | `set-path`, `update` | callbacks invoked, but incomplete | called with the parsed arguments, but there's no way to report back a result: driving the actual update requires the report/editor command sequence below, which isn't implemented |
-| `delete-path`, `link-path` (the rest of the report command set) | ❌ | not handled: replies "Unknown command" |
-| `commit` and the write-side editor commands | ❌ | no case for `commit` at all |
-| `lock`, `unlock`, `get-lock`, `get-locks` | ❌ | |
-| `rev-prop`, `rev-proplist`, `change-rev-prop` | ❌ | |
-| `get-dated-rev`, `get-mergeinfo`, `get-file-revs`, `replay`, `replay-range`, `get-deleted-rev`, `get-iprops` | ❌ | |
+| everything else (the rest of the report/editor command sets, `commit`, locking, revision properties, `get-mergeinfo`, `get-file-revs`, `replay`, ...) | ❌ | not handled: replies "Unknown command" — see [PROTOCOL.md](PROTOCOL.md) for the full list |
 
 In practice: a real `svn info`/`ls`/`cat`/`log` against a `svn.Server`
 implementation works (confirmed against a real `svn` client — see
