@@ -90,19 +90,25 @@ func (c *conn) ReadResponse(where any) error {
 
 // Close closes the connection.
 // It calls r.Close() and w.Close() if they are available.
+//
+// Both are always attempted, and c.i (the Itemizer wrapping c.r) is always
+// reset to nil, even if closing one of them fails -- e.g. because the
+// other end had already gone away, which is precisely when a caller is
+// most likely to be calling Close in the first place. Otherwise, Read
+// would keep reusing the old Itemizer (and so the old, already-broken c.r)
+// even after c.r/c.w are replaced by a fresh connection.
 func (c *conn) Close() error {
+	var err error
 	if cr, ok := c.r.(io.Closer); ok {
-		err := cr.Close()
-		if err != nil {
-			return err
+		if rerr := cr.Close(); rerr != nil {
+			err = rerr
 		}
 	}
 	if cw, ok := c.w.(io.Closer); ok {
-		err := cw.Close()
-		if err != nil {
-			return err
+		if werr := cw.Close(); werr != nil && err == nil {
+			err = werr
 		}
 	}
 	c.i = nil
-	return nil
+	return err
 }
