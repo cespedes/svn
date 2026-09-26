@@ -32,11 +32,12 @@ func requireRealSVNTools(t *testing.T) {
 // populates it over two commits with a real svn client, and returns its
 // file:// URL. It skips the test if the required tools aren't installed.
 //
-// Layout after both commits:
+// Layout after all three commits:
 //
 //	README.md       ("hello world\n" in r1, "hello world, v2\n" in r2)
 //	trunk/main.go
 //	trunk/sub/nested.txt
+//	trunk/main_copy.go (copied from trunk/main.go in r3)
 func newRealRepo(t *testing.T) string {
 	t.Helper()
 	requireRealSVNTools(t)
@@ -79,6 +80,9 @@ func newRealRepo(t *testing.T) string {
 	write("README.md", "hello world, v2\n")
 	run("commit", "-q", "-m", "update README")
 
+	run("copy", "-q", "trunk/main.go", "trunk/main_copy.go")
+	run("commit", "-q", "-m", "copy main.go")
+
 	return repoURL
 }
 
@@ -95,8 +99,8 @@ func TestClientAgainstRealSVNServer(t *testing.T) {
 		if err != nil {
 			t.Fatalf("GetLatestRev: %v", err)
 		}
-		if rev != 2 {
-			t.Errorf("GetLatestRev() = %d, want 2", rev)
+		if rev != 3 {
+			t.Errorf("GetLatestRev() = %d, want 3", rev)
 		}
 	})
 
@@ -189,8 +193,8 @@ func TestClientAgainstRealSVNServer(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Log: %v", err)
 		}
-		if len(entries) != 2 {
-			t.Fatalf("len(entries) = %d, want 2 (entries: %+v)", len(entries), entries)
+		if len(entries) != 3 {
+			t.Fatalf("len(entries) = %d, want 3 (entries: %+v)", len(entries), entries)
 		}
 		byRev := map[uint]string{}
 		for _, e := range entries {
@@ -201,6 +205,51 @@ func TestClientAgainstRealSVNServer(t *testing.T) {
 		}
 		if byRev[2] != "update README" {
 			t.Errorf("r2 message = %q, want %q", byRev[2], "update README")
+		}
+		if byRev[3] != "copy main.go" {
+			t.Errorf("r3 message = %q, want %q", byRev[3], "copy main.go")
+		}
+	})
+
+	// The wire shape of a LogEntry.Changed entry (a fixed 4-element tuple:
+	// path, mode, an optional copy-from group, an optional node-info
+	// group) is exactly what a previous bug got wrong -- this checks
+	// Client.Log actually decodes all of it correctly against a real
+	// svnserve, including the copy-from info r3's commit has.
+	t.Run("Log Changed includes copy-from info", func(t *testing.T) {
+		three := 3
+		entries, err := c.Log(nil, &three, &three, true)
+		if err != nil {
+			t.Fatalf("Log: %v", err)
+		}
+		if len(entries) != 1 {
+			t.Fatalf("len(entries) = %d, want 1 (entries: %+v)", len(entries), entries)
+		}
+		byPath := map[string]svn.ChangedPath{}
+		for _, cp := range entries[0].Changed {
+			byPath[cp.Path] = cp
+		}
+		cp, ok := byPath["/trunk/main_copy.go"]
+		if !ok {
+			t.Fatalf("Changed missing /trunk/main_copy.go (entries: %+v)", entries[0].Changed)
+		}
+		if cp.Mode != "A" {
+			t.Errorf("Mode = %q, want %q", cp.Mode, "A")
+		}
+		if cp.Copy == nil {
+			t.Fatalf("Copy is nil, want copy-from info")
+		}
+		if cp.Copy.Path != "/trunk/main.go" {
+			t.Errorf("Copy.Path = %q, want %q", cp.Copy.Path, "/trunk/main.go")
+		}
+		if cp.Copy.Rev != 1 {
+			t.Errorf("Copy.Rev = %d, want 1", cp.Copy.Rev)
+		}
+		if cp.Info == nil {
+			t.Fatalf("Info is nil, want node info")
+		}
+		if cp.Info.NodeKind != "file" {
+			t.Errorf("Info.NodeKind = %q, want %q", cp.Info.NodeKind, "file")
 		}
 	})
 
@@ -213,8 +262,8 @@ func TestClientAgainstRealSVNServer(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Log: %v", err)
 		}
-		if len(entries) != 3 {
-			t.Fatalf("len(entries) = %d, want 3 (entries: %+v)", len(entries), entries)
+		if len(entries) != 4 {
+			t.Fatalf("len(entries) = %d, want 4 (entries: %+v)", len(entries), entries)
 		}
 	})
 }

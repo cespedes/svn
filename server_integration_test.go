@@ -156,10 +156,28 @@ func newFakeServer() svn.Server {
 		return 1, nil, []byte(n.content), nil
 	}
 	server.Log = func(paths []string, startRev, endRev uint, changedPaths bool) ([]svn.LogEntry, error) {
-		return []svn.LogEntry{{
+		entry := svn.LogEntry{
 			Rev: 1, Author: "tester", Date: "2024-01-01T00:00:00.000000Z",
 			Message: "initial commit",
-		}}, nil
+		}
+		if changedPaths {
+			// trunk/main.go (a path containing '/', which a bare wire
+			// word can't hold) as a plain modification, and a copy, to
+			// exercise both the Path-as-string wire safety and the
+			// optional Copy/Info groups.
+			entry.Changed = []svn.ChangedPath{
+				{
+					Path: "/trunk/main.go", Mode: "M",
+					Info: &svn.ChangedPathInfo{NodeKind: "file", TextMods: true, PropMods: false},
+				},
+				{
+					Path: "/trunk/main_copy.go", Mode: "A",
+					Copy: &svn.ChangedPathCopy{Path: "/trunk/main.go", Rev: 1},
+					Info: &svn.ChangedPathInfo{NodeKind: "file", TextMods: false, PropMods: false},
+				},
+			}
+		}
+		return []svn.LogEntry{entry}, nil
 	}
 	return server
 }
@@ -259,6 +277,24 @@ func TestServerAgainstRealSVNClient(t *testing.T) {
 		}
 		if !strings.Contains(out, "tester") {
 			t.Errorf("log output missing author:\n%s", out)
+		}
+	})
+
+	// A LogEntry.Changed path is sent as a plain Go string; if server.go
+	// ever marshaled that as a bare wire word instead of a length-prefixed
+	// string, a path containing '/' (i.e. almost every real path) would
+	// produce invalid wire syntax. Also checks that copy-from info comes
+	// through correctly, since "svn log -v" prints it.
+	t.Run("log -v shows changed paths, including a copy", func(t *testing.T) {
+		out := run("log", "-v", repoURL)
+		if !strings.Contains(out, "/trunk/main.go") {
+			t.Errorf("log -v output missing the modified path:\n%s", out)
+		}
+		if !strings.Contains(out, "/trunk/main_copy.go") {
+			t.Errorf("log -v output missing the added path:\n%s", out)
+		}
+		if !strings.Contains(out, "(from /trunk/main.go:1)") {
+			t.Errorf("log -v output missing copy-from info:\n%s", out)
 		}
 	})
 

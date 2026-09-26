@@ -402,3 +402,84 @@ func TestUnmarshalWireStrings(t *testing.T) {
 		t.Errorf("got %+v, want %+v", got, want)
 	}
 }
+
+// TestUnmarshalLogEntryChanged replays a real svnserve's "log" response for
+// a revision that both modifies a file and adds one as a copy of another,
+// captured by hand-driving the wire protocol against a real repository.
+// This is the exact shape a previous bug got wrong: Path (and CopyPath)
+// must decode correctly from a length-prefixed string, and Copy/Info must
+// each come from their own independently-optional nested list.
+func TestUnmarshalLogEntryChanged(t *testing.T) {
+	item := Item{Type: ListType, List: []Item{
+		{Type: ListType, List: []Item{ // Changed
+			{Type: ListType, List: []Item{ // "/trunk/README.md": modified, no copy
+				{Type: StringType, Text: "/trunk/README.md"},
+				{Type: WordType, Text: "M"},
+				{Type: ListType}, // no copy-from info
+				{Type: ListType, List: []Item{
+					{Type: StringType, Text: "file"},
+					{Type: WordType, Text: "true"},
+					{Type: WordType, Text: "false"},
+				}},
+			}},
+			{Type: ListType, List: []Item{ // "/trunk/main_copy.go": added as a copy
+				{Type: StringType, Text: "/trunk/main_copy.go"},
+				{Type: WordType, Text: "A"},
+				{Type: ListType, List: []Item{
+					{Type: StringType, Text: "/trunk/main.go"},
+					{Type: NumberType, Number: 1},
+				}},
+				{Type: ListType, List: []Item{
+					{Type: StringType, Text: "file"},
+					{Type: WordType, Text: "false"},
+					{Type: WordType, Text: "false"},
+				}},
+			}},
+		}},
+		{Type: NumberType, Number: 2}, // Rev
+		{Type: ListType, List: []Item{{Type: StringType, Text: "cespedes"}}},
+		{Type: ListType, List: []Item{{Type: StringType, Text: "2026-09-26T15:59:22.454971Z"}}},
+		{Type: ListType, List: []Item{{Type: StringType, Text: "modify README, copy main.go"}}},
+		{Type: WordType, Text: "false"}, // has-children
+		{Type: WordType, Text: "false"}, // invalid-revnum
+		{Type: NumberType, Number: 0},   // revprop-count
+		{Type: ListType},                // rev-props
+		{Type: WordType, Text: "false"}, // subtractive-merge
+	}}
+
+	var entry LogEntry
+	if err := Unmarshal(item, &entry); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if entry.Rev != 2 {
+		t.Errorf("Rev = %d, want 2", entry.Rev)
+	}
+	if entry.Author != "cespedes" {
+		t.Errorf("Author = %q, want %q", entry.Author, "cespedes")
+	}
+	if len(entry.Changed) != 2 {
+		t.Fatalf("len(Changed) = %d, want 2 (Changed: %+v)", len(entry.Changed), entry.Changed)
+	}
+
+	readme := entry.Changed[0]
+	if readme.Path != "/trunk/README.md" || readme.Mode != "M" {
+		t.Errorf("Changed[0] = %+v, want Path=/trunk/README.md Mode=M", readme)
+	}
+	if readme.Copy != nil {
+		t.Errorf("Changed[0].Copy = %+v, want nil", readme.Copy)
+	}
+	if readme.Info == nil || readme.Info.NodeKind != "file" || !readme.Info.TextMods || readme.Info.PropMods {
+		t.Errorf("Changed[0].Info = %+v, want &{file true false}", readme.Info)
+	}
+
+	mainCopy := entry.Changed[1]
+	if mainCopy.Path != "/trunk/main_copy.go" || mainCopy.Mode != "A" {
+		t.Errorf("Changed[1] = %+v, want Path=/trunk/main_copy.go Mode=A", mainCopy)
+	}
+	if mainCopy.Copy == nil || mainCopy.Copy.Path != "/trunk/main.go" || mainCopy.Copy.Rev != 1 {
+		t.Errorf("Changed[1].Copy = %+v, want &{/trunk/main.go 1}", mainCopy.Copy)
+	}
+	if mainCopy.Info == nil || mainCopy.Info.NodeKind != "file" || mainCopy.Info.TextMods || mainCopy.Info.PropMods {
+		t.Errorf("Changed[1].Info = %+v, want &{file false false}", mainCopy.Info)
+	}
+}

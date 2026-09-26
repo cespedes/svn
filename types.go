@@ -64,18 +64,53 @@ type PropList struct {
 	Value string
 }
 
+// ChangedPath describes one path affected by a revision, as returned in a
+// LogEntry's Changed field. On the wire, this is a fixed 4-element tuple
+// -- path, mode, an optional copy-from group, an optional node-info group
+// -- confirmed against a real svnserve (a Word here, instead of the
+// length-prefixed String a real server always sends, breaks on any path
+// containing a character a bare word can't hold, e.g. '/').
+type ChangedPath struct {
+	// Path is the affected path, relative to the repository root.
+	Path string
+	// Mode is a single-letter change type, as used by "svn log -v" (e.g.
+	// "A" added, "D" deleted, "M" modified, "R" replaced).
+	Mode string
+	// Copy holds the path and revision this entry was copied from
+	// (typically alongside Mode "A" or "R"), or nil if it wasn't a copy.
+	Copy *ChangedPathCopy
+	// Info holds the node kind and modification flags, if the server
+	// included them (a real svnserve always does).
+	Info *ChangedPathInfo
+}
+
+// ChangedPathCopy is a ChangedPath's copy-from source, when it has one.
+type ChangedPathCopy struct {
+	// Path is the source path this entry was copied from.
+	Path string
+	// Rev is the revision it was copied from.
+	Rev uint
+}
+
+// ChangedPathInfo is a ChangedPath's node kind and modification flags,
+// when the server included them.
+type ChangedPathInfo struct {
+	// NodeKind is "file" or "dir".
+	NodeKind string
+	// TextMods reports whether the node's content changed in this
+	// revision.
+	TextMods bool
+	// PropMods reports whether the node's properties changed in this
+	// revision.
+	PropMods bool
+}
+
 // LogEntry is every one of the responses for the "log" command.
 type LogEntry struct {
 	// Changed lists the paths that were added, modified, deleted or
 	// replaced in this revision. It is only populated when the "log"
 	// command was called with changedPaths set to true.
-	Changed []struct {
-		// Path is the affected path, relative to the repository root.
-		Path string
-		// Mode is a single-letter change type, as used by "svn log -v"
-		// (e.g. "A" added, "D" deleted, "M" modified, "R" replaced).
-		Mode string
-	}
+	Changed []ChangedPath
 	// Rev is the revision number.
 	Rev uint
 	// Author is the value of the svn:author revision property.

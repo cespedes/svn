@@ -471,9 +471,34 @@ func (s *Server) Serve(r io.Reader, w io.Writer) error {
 				return err
 			}
 			for _, l := range logEntries {
-				// ( ( ) 7573 ( 3:noc ) ( 27:2024-04-02T13:37:34.350221Z ) ( 43:New open position: 2024-04-phd-visiting-apt ) false false 0 ( ) false )
+				// changed-path-entry: ( path:string mode:word
+				//   ? ( copy-path:string copy-rev:number )
+				//   ? ( node-kind:string text-mods:bool prop-mods:bool ) )
+				// Built by hand, rather than left to Marshal, because
+				// Path/CopyPath are plain Go strings for callers'
+				// convenience: Marshal would encode those as words,
+				// which breaks (confirmed against a real svnserve) as
+				// soon as a path contains a character a bare word can't
+				// hold, like '/'.
+				var changed []any
+				for _, cp := range l.Changed {
+					var copyGroup any = []any{}
+					if cp.Copy != nil {
+						copyGroup = []any{[]byte(cp.Copy.Path), cp.Copy.Rev}
+					}
+					var infoGroup any = []any{}
+					if cp.Info != nil {
+						infoGroup = []any{[]byte(cp.Info.NodeKind), cp.Info.TextMods, cp.Info.PropMods}
+					}
+					changed = append(changed, []any{
+						[]byte(cp.Path),
+						cp.Mode,
+						copyGroup,
+						infoGroup,
+					})
+				}
 				if err = conn.Write([]any{
-					l.Changed,
+					changed,
 					l.Rev,
 					[]any{[]byte(l.Author)},
 					[]any{[]byte(l.Date)},

@@ -232,7 +232,11 @@ func svnLog(repo string, lrev1 *int, lrev2 *int, verbose bool, stdout io.Writer)
 		if len(l.Changed) > 0 {
 			fmt.Fprintln(stdout, "Changed paths:")
 			for _, c := range l.Changed {
-				fmt.Fprintf(stdout, "%4s %s\n", c.Mode, c.Path)
+				if c.Copy != nil {
+					fmt.Fprintf(stdout, "%4s %s (from %s:%d)\n", c.Mode, c.Path, c.Copy.Path, c.Copy.Rev)
+				} else {
+					fmt.Fprintf(stdout, "%4s %s\n", c.Mode, c.Path)
+				}
 			}
 		}
 		fmt.Fprintln(stdout)
