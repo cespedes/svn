@@ -1,6 +1,7 @@
 package svn
 
 import (
+	"errors"
 	"net"
 	"testing"
 )
@@ -240,6 +241,105 @@ func TestServerFinishReportReceivesReportedPaths(t *testing.T) {
 		if gotReport[i] != want[i] {
 			t.Errorf("FinishReport report[%d] = %+v, want %+v", i, gotReport[i], want[i])
 		}
+	}
+
+	clientSide.Close()
+	<-serveErr
+}
+
+// TestServerFinishReportErrorReadsAbortEditAck checks that, when
+// FinishReport returns an error, Serve reads the client's ack of the
+// resulting "abort-edit" (the same way it already does for a successful
+// "close-edit") before answering "finish-report" itself -- and that the
+// connection is still usable afterward. Leaving that ack unread desyncs
+// the connection: the next command a real client sends is instead read
+// as that stale ack, misinterpreted as a bogus command (confirmed
+// against a real svn client, which then fails with "Unknown command
+// 'success'"; see CLAUDE.md).
+func TestServerFinishReportErrorReadsAbortEditAck(t *testing.T) {
+	clientSide, serverSide := net.Pipe()
+	defer clientSide.Close()
+
+	var server Server
+	server.FinishReport = func(report []ReportedPath) ([]Item, error) {
+		return nil, errors.New("unsupported report shape")
+	}
+	server.GetLatestRev = func() (int, error) { return 42, nil }
+
+	serveErr := make(chan error, 1)
+	go func() {
+		serveErr <- server.Serve(serverSide, serverSide)
+	}()
+
+	cc := conn{r: clientSide, w: clientSide}
+
+	var item Item
+	if err := cc.Read(&item); err != nil {
+		t.Fatalf("reading greeting: %v", err)
+	}
+	if err := cc.Write([]any{2, []any{}, []byte("svn://example.com/repo"), []byte("test-client"), []any{}}); err != nil {
+		t.Fatalf("sending greeting response: %v", err)
+	}
+	if err := cc.Read(&item); err != nil {
+		t.Fatalf("reading auth-request: %v", err)
+	}
+	if err := cc.Write([]any{"ANONYMOUS", []any{[]byte{}}}); err != nil {
+		t.Fatalf("sending auth-response: %v", err)
+	}
+	if err := cc.Read(&item); err != nil {
+		t.Fatalf("reading auth ack: %v", err)
+	}
+	if err := cc.Read(&item); err != nil {
+		t.Fatalf("reading repos-info: %v", err)
+	}
+
+	if err := cc.Write([]any{"set-path", []any{
+		[]byte(""), uint(5), true,
+	}}); err != nil {
+		t.Fatalf("sending set-path: %v", err)
+	}
+	if err := cc.Write([]any{"finish-report", []any{}}); err != nil {
+		t.Fatalf("sending finish-report: %v", err)
+	}
+
+	if err := cc.Read(&item); err != nil {
+		t.Fatalf("reading finish-report ack: %v", err)
+	}
+	if err := cc.Read(&item); err != nil {
+		t.Fatalf("reading abort-edit: %v", err)
+	}
+	if item.Type != ListType || len(item.List) != 2 || item.List[0].Text != "abort-edit" {
+		t.Fatalf("got %s, want an abort-edit command", item)
+	}
+	if err := cc.Write([]any{"success", []any{}}); err != nil {
+		t.Fatalf("acking abort-edit: %v", err)
+	}
+	// This must be finish-report's own "(success ())" response. If Serve
+	// never read the ack above, it's still sitting unread in the pipe,
+	// and Serve's next read (of a *command*, not a response) consumes it
+	// instead -- misread as a bogus command named "success", which
+	// Serve replies to with a failure response; that failure is what
+	// ReadResponse would see here instead, and return as an error.
+	if err := cc.ReadResponse(&struct{}{}); err != nil {
+		t.Fatalf("reading finish-report's final response: %v", err)
+	}
+
+	// A further command still gets a normal response: the desync above
+	// is exactly one exchange wide (Serve's own failure reply to the
+	// misread "success" resyncs the connection), so this alone wouldn't
+	// catch a regression -- the ReadResponse call above is what does.
+	if err := cc.Write([]any{"get-latest-rev", []any{}}); err != nil {
+		t.Fatalf("sending get-latest-rev: %v", err)
+	}
+	if err := cc.Read(&item); err != nil {
+		t.Fatalf("reading get-latest-rev ack: %v", err)
+	}
+	var rec struct{ Rev int }
+	if err := cc.ReadResponse(&rec); err != nil {
+		t.Fatalf("reading get-latest-rev response: %v", err)
+	}
+	if rec.Rev != 42 {
+		t.Errorf("get-latest-rev = %d, want 42", rec.Rev)
 	}
 
 	clientSide.Close()

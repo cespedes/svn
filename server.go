@@ -596,6 +596,20 @@ func (s *Server) Serve(r io.Reader, w io.Writer) error {
 				if err = conn.Write([]any{"abort-edit", []any{}}); err != nil {
 					return err
 				}
+				// The client acks abort-edit the same way it acks
+				// close-edit below: read that ack before the final
+				// response to "finish-report" itself, or it's left
+				// unread and desyncs the connection -- the next thing
+				// the client sends gets misread as a bogus command
+				// (confirmed against a real svn client, which sends
+				// exactly this ack and then fails with "Unknown command
+				// 'success'" once desynced this way).
+				if err = conn.ReadResponse(&item); err != nil {
+					return err
+				}
+				if err = conn.WriteSuccess([]any{}); err != nil {
+					return err
+				}
 				continue
 			}
 			for _, i := range items {
