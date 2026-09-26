@@ -1,12 +1,15 @@
 package svn
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
+	"net"
 	"net/url"
 	"os/exec"
 	"sync"
+	"syscall"
 )
 
 // SvnClient is the SVN client string to send to servers.
@@ -23,6 +26,15 @@ const SvnClient = "GoSVN/0.0.0"
 // buys safety, not parallelism: concurrent calls still run one at a time,
 // queued behind each other. For real concurrency, use a pool of Clients
 // instead of sharing one.
+//
+// A Client created with [Connect] also recovers transparently from a
+// broken connection (e.g. the ssh tunnel dropping, or the local svnserve
+// subprocess dying): if an RPC method fails with what looks like a broken
+// connection, it reconnects (redoing exactly what Connect did) and retries
+// the call once. This is always safe here because every RPC is read-only,
+// so a retry can't duplicate a side effect. A Client created with
+// [NewClient] has no way to reopen a caller-supplied connection, so it
+// can't do this; such a failure is simply returned.
 type Client struct {
 	mu   sync.Mutex
 	conn conn
@@ -30,6 +42,12 @@ type Client struct {
 	// Info holds the repository information (UUID, root URL, capabilities)
 	// received from the server during Connect.
 	Info ReposInfo
+
+	// reconnect, if set, closes the current connection (killing any still
+	// -running subprocess first) and re-establishes it from scratch,
+	// including redoing the handshake. Connect sets this, since it
+	// always knows how to redo what it did; NewClient leaves it nil.
+	reconnect func() error
 }
 
 // Connect creates a [Client] and establishes a connection to a SVN server,
@@ -81,11 +99,20 @@ func Connect(address string) (*Client, error) {
 		return nil, fmt.Errorf("svn: connect to %q: scheme %q not implemented", address, u.Scheme)
 	}
 
-	if err := c.exec(execArgs[0], execArgs[1:]...); err != nil {
-		return nil, err
+	connectURL := u.String()
+	c.reconnect = func() error {
+		c.conn.Close()
+		if c.cmd != nil && c.cmd.Process != nil {
+			c.cmd.Process.Kill()
+			c.cmd.Wait()
+		}
+		if err := c.exec(execArgs[0], execArgs[1:]...); err != nil {
+			return err
+		}
+		return c.handshake(connectURL)
 	}
 
-	if err := c.handshake(u.String()); err != nil {
+	if err := c.reconnect(); err != nil {
 		return nil, err
 	}
 
@@ -101,6 +128,10 @@ func Connect(address string) (*Client, error) {
 // This lets a caller supply its own transport: a connection dialed by
 // hand, an in-memory pipe for testing, or (once this package supports
 // svn:// directly) a raw TCP connection.
+//
+// Unlike a [Connect]-created Client, one made this way has no way to
+// reopen r and w if the connection breaks, so it can't recover from that
+// automatically; see the Client doc comment.
 func NewClient(r io.Reader, w io.Writer, address string) (*Client, error) {
 	c := &Client{conn: conn{r: r, w: w}}
 	if err := c.handshake(address); err != nil {
@@ -218,6 +249,35 @@ func (c *Client) handleAuth() error {
 	return nil
 }
 
+// isConnectionError reports whether err looks like the underlying
+// connection broke, as opposed to a protocol-level failure (an [Error]) or
+// an ordinary application-level error (like [fs.ErrNotExist]) -- the cases
+// worth reconnecting and retrying for.
+func isConnectionError(err error) bool {
+	return errors.Is(err, io.EOF) ||
+		errors.Is(err, io.ErrClosedPipe) ||
+		errors.Is(err, fs.ErrClosed) || // e.g. a subprocess's stdin pipe, once exec.Cmd has reaped it
+		errors.Is(err, net.ErrClosed) ||
+		errors.Is(err, syscall.EPIPE) ||
+		errors.Is(err, syscall.ECONNRESET)
+}
+
+// withReconnect calls fn. If fn fails with what looks like a broken
+// connection, and c knows how to reconnect (see the Client doc comment),
+// it reconnects and calls fn a second time. Every RPC method uses this;
+// it's always safe to retry them; since they're all read-only, a retry
+// can't duplicate a side effect.
+func (c *Client) withReconnect(fn func() error) error {
+	err := fn()
+	if err == nil || c.reconnect == nil || !isConnectionError(err) {
+		return err
+	}
+	if rerr := c.reconnect(); rerr != nil {
+		return fmt.Errorf("%w (reconnecting also failed: %v)", err, rerr)
+	}
+	return fn()
+}
+
 func sendCommand[Output any](c *Client, cmd string, params any) (Output, error) {
 	var out Output
 
@@ -241,7 +301,13 @@ func sendCommand[Output any](c *Client, cmd string, params any) (Output, error) 
 func (c *Client) GetLatestRev() (int, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return sendCommand[int](c, "get-latest-rev", []any{})
+	var rev int
+	err := c.withReconnect(func() error {
+		var err error
+		rev, err = sendCommand[int](c, "get-latest-rev", []any{})
+		return err
+	})
+	return rev, err
 }
 
 // Stat sends a "stat" command, asking for the status of path at rev, or at
@@ -265,16 +331,22 @@ func (c *Client) Stat(path string, rev *int) (Stat, error) {
 	// exactly this shape -- unmarshaling straight into a Stat, or even
 	// into a single level of 0-or-1-element list, only ever fills the
 	// first field.
-	raw, err := sendCommand[Item](c, "stat", input)
+	var stat Stat
+	err := c.withReconnect(func() error {
+		raw, err := sendCommand[Item](c, "stat", input)
+		if err != nil {
+			return err
+		}
+		if len(raw.List) == 0 || len(raw.List[0].List) == 0 {
+			return fmt.Errorf("stat: %q: %w", path, fs.ErrNotExist)
+		}
+		if err := Unmarshal(raw.List[0].List[0], &stat); err != nil {
+			return fmt.Errorf("stat: %q: %w", path, err)
+		}
+		return nil
+	})
 	if err != nil {
 		return Stat{}, err
-	}
-	if len(raw.List) == 0 || len(raw.List[0].List) == 0 {
-		return Stat{}, fmt.Errorf("stat: %q: %w", path, fs.ErrNotExist)
-	}
-	var stat Stat
-	if err := Unmarshal(raw.List[0].List[0], &stat); err != nil {
-		return Stat{}, fmt.Errorf("stat: %q: %w", path, err)
 	}
 	return stat, nil
 }
@@ -299,38 +371,46 @@ func (c *Client) List(path string, rev *int, depth string, fields []string) ([]D
 		depth,
 		fields,
 	}
-	err := c.conn.Write([]any{
-		"list",
-		params,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("client: sending \"list\": %w", err)
-	}
-	if err = c.handleAuth(); err != nil {
-		return nil, fmt.Errorf("client: List: auth: %w", err)
-	}
 
 	var dirents []Dirent
-	for {
+	err := c.withReconnect(func() error {
+		dirents = nil // discard any partial result from a previous attempt
+		err := c.conn.Write([]any{
+			"list",
+			params,
+		})
+		if err != nil {
+			return fmt.Errorf("client: sending \"list\": %w", err)
+		}
+		if err = c.handleAuth(); err != nil {
+			return fmt.Errorf("client: List: auth: %w", err)
+		}
+
+		for {
+			var item Item
+			err = c.conn.Read(&item)
+			if err != nil {
+				return fmt.Errorf("client: List: reading dirent entry: %w", err)
+			}
+			if item.Type == WordType && item.Text == "done" {
+				break
+			}
+			var dirent Dirent
+			err = Unmarshal(item, &dirent)
+			if err != nil {
+				return fmt.Errorf("client: List: unmarshaling dirent entry: %w", err)
+			}
+			dirents = append(dirents, dirent)
+		}
 		var item Item
-		err = c.conn.Read(&item)
+		err = c.conn.ReadResponse(&item)
 		if err != nil {
-			return nil, fmt.Errorf("client: List: reading dirent entry: %w", err)
+			return fmt.Errorf("client: List: reading final response: %w", err)
 		}
-		if item.Type == WordType && item.Text == "done" {
-			break
-		}
-		var dirent Dirent
-		err = Unmarshal(item, &dirent)
-		if err != nil {
-			return nil, fmt.Errorf("client: List: unmarshaling dirent entry: %w", err)
-		}
-		dirents = append(dirents, dirent)
-	}
-	var item Item
-	err = c.conn.ReadResponse(&item)
+		return nil
+	})
 	if err != nil {
-		return nil, fmt.Errorf("client: List: reading final response: %w", err)
+		return nil, err
 	}
 	return dirents, nil
 }
@@ -358,44 +438,54 @@ func (c *Client) GetFile(path string, rev *int, wantProps bool, wantContent bool
 		Rev      int
 		Props    []PropList
 	}
-	response, err := sendCommand[FileResponse](c, "get-file", []any{
-		[]byte(path),
-		lrev,
-		wantProps,
-		wantContent,
-		"false",
-	})
 
-	if err != nil {
-		return nil, nil, fmt.Errorf("GetFile: %w", err)
-	}
-
-	if !wantContent {
-		return response.Props, nil, nil
-	}
-	content := []byte{}
-	for {
-		var b []byte
-		err = c.conn.Read(&b)
+	var props []PropList
+	var content []byte
+	err := c.withReconnect(func() error {
+		props = nil
+		content = nil
+		response, err := sendCommand[FileResponse](c, "get-file", []any{
+			[]byte(path),
+			lrev,
+			wantProps,
+			wantContent,
+			"false",
+		})
 		if err != nil {
-			return nil, nil, fmt.Errorf("GetFile: reading content: %w", err)
+			return fmt.Errorf("GetFile: %w", err)
 		}
-		if len(b) == 0 {
-			break
+		props = response.Props
+
+		if !wantContent {
+			return nil
 		}
-		content = append(content, b...)
-	}
+		buf := []byte{}
+		for {
+			var b []byte
+			if err := c.conn.Read(&b); err != nil {
+				return fmt.Errorf("GetFile: reading content: %w", err)
+			}
+			if len(b) == 0 {
+				break
+			}
+			buf = append(buf, b...)
+		}
 
-	// The protocol sends a second, empty command response after the content
-	// terminator, to report whether an error occurred while sending the
-	// file. It must be consumed here, or it will desync the connection for
-	// whatever command runs next.
-	var final Item
-	if err = c.conn.ReadResponse(&final); err != nil {
-		return nil, nil, fmt.Errorf("GetFile: reading final response: %w", err)
+		// The protocol sends a second, empty command response after the
+		// content terminator, to report whether an error occurred while
+		// sending the file. It must be consumed here, or it will desync
+		// the connection for whatever command runs next.
+		var final Item
+		if err := c.conn.ReadResponse(&final); err != nil {
+			return fmt.Errorf("GetFile: reading final response: %w", err)
+		}
+		content = buf
+		return nil
+	})
+	if err != nil {
+		return nil, nil, err
 	}
-
-	return response.Props, content, nil
+	return props, content, nil
 }
 
 //  log
@@ -432,47 +522,54 @@ func (c *Client) Log(paths []string, startRev *int, endRev *int, changedPaths bo
 		bpaths = append(bpaths, []byte(p))
 	}
 
-	err := c.conn.Write([]any{
-		"log", []any{
-			bpaths,
-			srev,
-			erev,
-			changedPaths,
-			false, 0, false, "revprops", []any{
-				[]byte("svn:author"),
-				[]byte("svn:date"),
-				[]byte("svn:log"),
+	var entries []LogEntry
+	err := c.withReconnect(func() error {
+		entries = nil // discard any partial result from a previous attempt
+		err := c.conn.Write([]any{
+			"log", []any{
+				bpaths,
+				srev,
+				erev,
+				changedPaths,
+				false, 0, false, "revprops", []any{
+					[]byte("svn:author"),
+					[]byte("svn:date"),
+					[]byte("svn:log"),
+				},
 			},
-		},
+		})
+		if err != nil {
+			return fmt.Errorf("client: sending \"log\": %w", err)
+		}
+		if err = c.handleAuth(); err != nil {
+			return fmt.Errorf("client: Log: auth: %w", err)
+		}
+
+		for {
+			var item Item
+			err = c.conn.Read(&item)
+			if err != nil {
+				return fmt.Errorf("client: Log: reading log entriy: %w", err)
+			}
+			if item.Type == WordType && item.Text == "done" {
+				break
+			}
+			var entry LogEntry
+			err = Unmarshal(item, &entry)
+			if err != nil {
+				return fmt.Errorf("client: Log: unmarshaling dirent entry: %w", err)
+			}
+			entries = append(entries, entry)
+		}
+		var item Item
+		err = c.conn.ReadResponse(&item)
+		if err != nil {
+			return fmt.Errorf("client: Log: reading final response: %w", err)
+		}
+		return nil
 	})
 	if err != nil {
-		return nil, fmt.Errorf("client: sending \"log\": %w", err)
-	}
-	if err = c.handleAuth(); err != nil {
-		return nil, fmt.Errorf("client: Log: auth: %w", err)
-	}
-
-	var entries []LogEntry
-	for {
-		var item Item
-		err = c.conn.Read(&item)
-		if err != nil {
-			return nil, fmt.Errorf("client: Log: reading log entriy: %w", err)
-		}
-		if item.Type == WordType && item.Text == "done" {
-			break
-		}
-		var entry LogEntry
-		err = Unmarshal(item, &entry)
-		if err != nil {
-			return nil, fmt.Errorf("client: Log: unmarshaling dirent entry: %w", err)
-		}
-		entries = append(entries, entry)
-	}
-	var item Item
-	err = c.conn.ReadResponse(&item)
-	if err != nil {
-		return nil, fmt.Errorf("client: Log: reading final response: %w", err)
+		return nil, err
 	}
 	return entries, nil
 }

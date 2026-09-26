@@ -84,6 +84,13 @@ speaks the protocol over its standard input/output. See
 [`examples/client`](examples/client) for a more complete example, covering
 `Stat`, `List` and `GetFile`.
 
+If the underlying connection breaks (the ssh tunnel drops, the local
+`svnserve` subprocess dies, ...), a `Connect`-created `Client` reconnects
+transparently and retries the call once -- safe to do because every RPC is
+read-only. A `Client` made with `NewClient` (over a caller-supplied
+connection) can't do this, since it has no way to reopen that connection
+itself.
+
 ## Using the server
 
 `svn.Server` drives the server side of the protocol handshake and dispatches

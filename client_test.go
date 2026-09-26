@@ -1,9 +1,13 @@
 package svn
 
 import (
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
+	"os/exec"
+	"path/filepath"
 	"sync"
 	"testing"
 )
@@ -392,5 +396,179 @@ func TestClientConcurrentUse(t *testing.T) {
 	clientSide.Close()
 	if err := <-serveErr; err != io.EOF {
 		t.Fatalf("Serve: %v", err)
+	}
+}
+
+func TestIsConnectionError(t *testing.T) {
+	cases := []struct {
+		desc string
+		err  error
+		want bool
+	}{
+		{"EOF", io.EOF, true},
+		{"wrapped EOF", fmt.Errorf("reading: %w", io.EOF), true},
+		{"closed pipe", io.ErrClosedPipe, true},
+		{"closed file (e.g. a reaped subprocess's stdin pipe)", fs.ErrClosed, true},
+		{"a protocol failure (Error)", Error{AprErr: 1, Message: "nope"}, false},
+		{"fs.ErrNotExist", fs.ErrNotExist, false},
+		{"an unrelated error", errors.New("boom"), false},
+		{"nil", nil, false},
+	}
+	for _, tt := range cases {
+		t.Run(tt.desc, func(t *testing.T) {
+			if got := isConnectionError(tt.err); got != tt.want {
+				t.Errorf("isConnectionError(%v) = %v, want %v", tt.err, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestClientReconnectsOnBrokenConnection simulates a Client whose
+// connection has already broken (both ends closed, so any read/write on
+// it fails with io.ErrClosedPipe) and whose reconnect closure swaps in a
+// fresh, working connection to a real Server. It checks that a single RPC
+// call transparently reconnects and succeeds, retrying exactly once.
+func TestClientReconnectsOnBrokenConnection(t *testing.T) {
+	brokenR, brokenW := net.Pipe()
+	brokenR.Close()
+	brokenW.Close()
+
+	clientSide, serverSide := net.Pipe()
+	var server Server
+	server.GetLatestRev = func() (int, error) { return 99, nil }
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- server.Serve(serverSide, serverSide) }()
+
+	reconnectCalls := 0
+	c := &Client{conn: conn{r: brokenR, w: brokenW}}
+	c.reconnect = func() error {
+		reconnectCalls++
+		c.conn = conn{r: clientSide, w: clientSide}
+		return c.handshake("svn+ssh://example.com/repo")
+	}
+
+	rev, err := c.GetLatestRev()
+	if err != nil {
+		t.Fatalf("GetLatestRev: %v", err)
+	}
+	if rev != 99 {
+		t.Errorf("GetLatestRev() = %d, want 99", rev)
+	}
+	if reconnectCalls != 1 {
+		t.Errorf("reconnect was called %d times, want 1", reconnectCalls)
+	}
+
+	clientSide.Close()
+	if err := <-serveErr; err != io.EOF {
+		t.Fatalf("Serve: %v", err)
+	}
+}
+
+// TestClientNoReconnectWithoutReconnectFunc checks that a Client with no
+// reconnect set (as NewClient/Connect leave it when they don't know how to
+// reopen the connection) just returns the broken-connection error as-is.
+func TestClientNoReconnectWithoutReconnectFunc(t *testing.T) {
+	brokenR, brokenW := net.Pipe()
+	brokenR.Close()
+	brokenW.Close()
+
+	c := &Client{conn: conn{r: brokenR, w: brokenW}}
+	if _, err := c.GetLatestRev(); !isConnectionError(err) {
+		t.Errorf("GetLatestRev() error = %v, want a connection error", err)
+	}
+}
+
+// TestClientNoReconnectOnApplicationError checks that withReconnect leaves
+// an ordinary application-level error (not a broken connection) alone,
+// without attempting to reconnect at all.
+func TestClientNoReconnectOnApplicationError(t *testing.T) {
+	c, server := newTestClient()
+	defer server.Close()
+
+	reconnectCalls := 0
+	c.reconnect = func() error {
+		reconnectCalls++
+		return nil
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		sc := conn{r: server, w: server}
+		var item Item
+		if err := sc.Read(&item); err != nil {
+			done <- err
+			return
+		}
+		if err := sc.WriteSuccess([]any{[]any{}, []byte{}}); err != nil {
+			done <- err
+			return
+		}
+		// Empty response: Stat's own "not found" shape, not a broken
+		// connection.
+		if err := sc.WriteSuccess([]any{}); err != nil {
+			done <- err
+			return
+		}
+		done <- nil
+	}()
+
+	if _, err := c.Stat("does/not/exist", nil); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("Stat error = %v, want errors.Is(err, fs.ErrNotExist)", err)
+	}
+	if reconnectCalls != 0 {
+		t.Errorf("reconnect was called %d times, want 0", reconnectCalls)
+	}
+
+	if err := <-done; err != nil {
+		t.Fatalf("fake server: %v", err)
+	}
+}
+
+// TestConnectReconnectsAfterSubprocessDies is the real end-to-end version
+// of TestClientReconnectsOnBrokenConnection: it creates a real, temporary
+// repository, connects to it for real (svnserve -t as a genuine
+// subprocess), kills that subprocess out from under the Client, and checks
+// that the next call transparently spawns a new one and succeeds. Skips
+// cleanly if svnadmin/svnserve aren't on PATH.
+func TestConnectReconnectsAfterSubprocessDies(t *testing.T) {
+	for _, tool := range []string{"svnadmin", "svnserve"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			t.Skipf("%s not found in PATH; skipping test against a real svnserve", tool)
+		}
+	}
+
+	repoPath := filepath.Join(t.TempDir(), "repo")
+	if out, err := exec.Command("svnadmin", "create", repoPath).CombinedOutput(); err != nil {
+		t.Fatalf("svnadmin create: %v\n%s", err, out)
+	}
+
+	c, err := Connect("file://" + repoPath)
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+
+	rev, err := c.GetLatestRev()
+	if err != nil {
+		t.Fatalf("GetLatestRev: %v", err)
+	}
+	if rev != 0 {
+		t.Fatalf("GetLatestRev() = %d, want 0 (a freshly created repo)", rev)
+	}
+
+	oldPID := c.cmd.Process.Pid
+	if err := c.cmd.Process.Kill(); err != nil {
+		t.Fatalf("killing the svnserve subprocess: %v", err)
+	}
+	c.cmd.Wait()
+
+	rev, err = c.GetLatestRev()
+	if err != nil {
+		t.Fatalf("GetLatestRev after killing the subprocess: %v", err)
+	}
+	if rev != 0 {
+		t.Errorf("GetLatestRev() = %d, want 0", rev)
+	}
+	if c.cmd.Process.Pid == oldPID {
+		t.Errorf("subprocess PID unchanged (%d): reconnect did not spawn a new one", oldPID)
 	}
 }
