@@ -111,7 +111,7 @@ returns.
 | `close-file` | ❌ | ⚠️ `EditorWriter.CloseFile` |
 | `absent-file` | ❌ | ⚠️ `EditorWriter.AbsentFile` |
 | `close-edit` | ❌ | ⚠️ always sent automatically at the end of a successful `finish-report`, and its client ack read, before `Serve` answers `finish-report` itself; the command itself is never parsed |
-| `abort-edit` | ❌ | ⚠️ same, if a `finish-report` callback errors instead: sent automatically, its client ack read (a real client sends one either way -- confirmed the hard way, see CLAUDE.md), before answering `finish-report`; never parsed |
+| `abort-edit` | ❌ | ⚠️ same, if a `finish-report` callback errors instead: sent automatically, its client ack read (a real client sends one either way -- confirmed the hard way), before answering `finish-report`; never parsed |
 | `finish-replay` | ❌ | ❌ |
 
 ## Auth mechanisms

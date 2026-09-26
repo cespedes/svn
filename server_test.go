@@ -255,7 +255,7 @@ func TestServerFinishReportReceivesReportedPaths(t *testing.T) {
 // the connection: the next command a real client sends is instead read
 // as that stale ack, misinterpreted as a bogus command (confirmed
 // against a real svn client, which then fails with "Unknown command
-// 'success'"; see CLAUDE.md).
+// 'success'").
 func TestServerFinishReportErrorReadsAbortEditAck(t *testing.T) {
 	clientSide, serverSide := net.Pipe()
 	defer clientSide.Close()

@@ -187,7 +187,7 @@ func (e *EditorWriter) AddDir(path string, copyFrom *EditorCopyFrom) error {
 // expects it, contrary to a first, textually-literal reading of the
 // protocol's own grammar for this command, which shows it as a bare,
 // non-bracketed rev:number (a real client rejects the bare form with
-// "E210004: Malformed network data"; see CLAUDE.md).
+// "E210004: Malformed network data").
 func (e *EditorWriter) OpenDir(path string, rev uint) error {
 	parent, err := e.topDir()
 	if err != nil {
@@ -319,7 +319,7 @@ func (e *EditorWriter) AbsentFile(path string) error {
 // revision here) -- confirmed against a real svnserve to be optional,
 // contrary to a first, textually-literal reading of the protocol's own
 // grammar for this command, which shows it as a bare, non-bracketed
-// rev:number (see CLAUDE.md).
+// rev:number.
 func (e *EditorWriter) DeleteEntry(path string, rev *uint) error {
 	parent, err := e.topDir()
 	if err != nil {

@@ -33,9 +33,9 @@ func checkoutFakeTree() map[string]checkoutFakeNode {
 // newCheckoutFakeServer returns a Server whose List/GetFile are backed by
 // checkoutFakeTree, with every path already relative to whatever root
 // CheckoutEdit is asked to walk (i.e. no session-anchor resolution, since
-// none of these tests exercise one -- see the "Wire shapes" note on
-// session anchoring in CLAUDE.md for why a real List/GetFile would
-// otherwise need one).
+// none of these tests exercise one -- a real List/GetFile would
+// otherwise need one, to resolve a session anchored below the
+// repository root).
 func newCheckoutFakeServer() *Server {
 	tree := checkoutFakeTree()
 	var s Server
@@ -115,8 +115,8 @@ func TestCheckoutEditTreeShape(t *testing.T) {
 
 			// The 4 svn:entry:* pseudo-properties a real client's local
 			// metadata database needs (confirmed: a missing committed-rev
-			// crashes a real "svn checkout" outright -- see CLAUDE.md)
-			// come right after add-file, before any content.
+			// crashes a real "svn checkout" outright) come right after
+			// add-file, before any content.
 			propNames := []string{
 				"svn:entry:committed-rev", "svn:entry:committed-date",
 				"svn:entry:last-author", "svn:entry:uuid",

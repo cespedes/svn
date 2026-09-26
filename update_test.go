@@ -102,10 +102,10 @@ func itemsNamed(items []Item, command string) map[string]Item {
 
 // TestUpdateEditTreeShape checks that UpdateEdit, diffing updateFakeTreeAt
 // between rev 1 and rev 2, describes exactly what changed: an unmodified
-// file is never opened at all (confirmed against a real svnserve to be
-// how it behaves too -- see CLAUDE.md), a modified file is opened (not
-// added) with its new content, a removed entry is delete-entry'd, and new
-// entries are added.
+// file is never opened at all (confirmed against a real svnserve to
+// behave the same way), a modified file is opened (not added) with its
+// new content, a removed entry is delete-entry'd, and new entries are
+// added.
 func TestUpdateEditTreeShape(t *testing.T) {
 	s := newUpdateFakeServer()
 	items, err := s.UpdateEdit("", 1, 2)

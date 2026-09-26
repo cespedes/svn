@@ -23,7 +23,7 @@ func checksum(content []byte) []byte {
 // length-prefixed strings, not words) and the token/nesting bookkeeping
 // (sequential token allocation, correct parent references, and every
 // open node closed in the right order) -- all confirmed against a real
-// svnserve's own "checkout" editor sequence (see CLAUDE.md).
+// svnserve's own "checkout" editor sequence.
 func TestEditorWriterTreeShape(t *testing.T) {
 	e := NewEditorWriter()
 	rootRev := uint(1)
@@ -143,8 +143,8 @@ func TestEditorWriterTreeShape(t *testing.T) {
 
 // TestEditorWriterOpenAndDeleteWireShape checks OpenDir/OpenFile/
 // DeleteEntry against golden text captured from a real svnserve's own
-// "update" editor sequence (see CLAUDE.md). Both bugs this test would
-// have caught went undetected until a real "svn update" against a real
+// "update" editor sequence. Both bugs this test would have caught went
+// undetected until a real "svn update" against a real
 // svnserve, and then a real "svn" client, actually rejected the
 // generated sequence with "E210004: Malformed network data":
 //   - OpenDir/OpenFile's own rev is wrapped as a "[ rev:number ]"
