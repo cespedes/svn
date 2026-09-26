@@ -69,31 +69,34 @@ reach `finish-report`.
 Describes a tree of changes, one command per node touched. Used in two
 directions: server → client while driving an `update`/`switch` (after
 `finish-report`), and client → server while performing a `commit`. Neither
-direction is implemented in any structured way in this package: a
-`Server.FinishReport` implementation could in principle emit some of these
-by hand (see `finish-report` above), and `close-edit`/`abort-edit`
-specifically are always sent automatically by `server.go` to end that
-exchange, but nothing here parses or generates the rest, in either
-direction.
+direction PARSES any of these (nothing in this package reads an Editor
+Command Set sequence sent to it); generating the server → client
+direction is what `EditorWriter` (`editor.go`) is for -- one typed method
+per command below, building up the `[]Item` a `Server.FinishReport`
+implementation can return -- but it isn't wired into `Serve` yet: nothing
+calls it automatically, and there is still no way to drive an actual
+`update`/`switch`/`checkout` end to end. `close-edit`/`abort-edit`
+specifically are always sent automatically by `server.go` itself (not via
+`EditorWriter`) to end the exchange once `FinishReport` returns.
 
 | Command | Client | Server |
 | --- | --- | --- |
-| `target-rev` | ❌ | ❌ |
-| `open-root` | ❌ | ❌ |
-| `delete-entry` | ❌ | ❌ |
-| `add-dir` | ❌ | ❌ |
-| `open-dir` | ❌ | ❌ |
-| `change-dir-prop` | ❌ | ❌ |
-| `close-dir` | ❌ | ❌ |
-| `absent-dir` | ❌ | ❌ |
-| `add-file` | ❌ | ❌ |
-| `open-file` | ❌ | ❌ |
-| `apply-textdelta` | ❌ | ❌ |
-| `textdelta-chunk` | ❌ | ❌ |
-| `textdelta-end` | ❌ | ❌ |
-| `change-file-prop` | ❌ | ❌ |
-| `close-file` | ❌ | ❌ |
-| `absent-file` | ❌ | ❌ |
+| `target-rev` | ❌ | ⚠️ `EditorWriter.TargetRev` builds the `Item`; nothing sends it automatically |
+| `open-root` | ❌ | ⚠️ `EditorWriter.OpenRoot` |
+| `delete-entry` | ❌ | ⚠️ `EditorWriter.DeleteEntry` |
+| `add-dir` | ❌ | ⚠️ `EditorWriter.AddDir` |
+| `open-dir` | ❌ | ⚠️ `EditorWriter.OpenDir` |
+| `change-dir-prop` | ❌ | ⚠️ `EditorWriter.ChangeDirProp` |
+| `close-dir` | ❌ | ⚠️ `EditorWriter.CloseDir` |
+| `absent-dir` | ❌ | ⚠️ `EditorWriter.AbsentDir` |
+| `add-file` | ❌ | ⚠️ `EditorWriter.AddFile` |
+| `open-file` | ❌ | ⚠️ `EditorWriter.OpenFile` |
+| `apply-textdelta` | ❌ | ⚠️ `EditorWriter.ApplyTextdelta` (always a single, sourceless `EncodeSvndiff` window -- no incremental delta against a real base yet) |
+| `textdelta-chunk` | ❌ | ⚠️ emitted by `EditorWriter.ApplyTextdelta`, not its own method |
+| `textdelta-end` | ❌ | ⚠️ same |
+| `change-file-prop` | ❌ | ⚠️ `EditorWriter.ChangeFileProp` |
+| `close-file` | ❌ | ⚠️ `EditorWriter.CloseFile` |
+| `absent-file` | ❌ | ⚠️ `EditorWriter.AbsentFile` |
 | `close-edit` | ❌ | ⚠️ always sent automatically at the end of a successful `finish-report`; never parsed |
 | `abort-edit` | ❌ | ⚠️ always sent automatically if a `finish-report` callback errors; never parsed |
 | `finish-replay` | ❌ | ❌ |
