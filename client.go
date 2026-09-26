@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"net/url"
 	"os/exec"
+	"sync"
 )
 
 // SvnClient is the SVN client string to send to servers.
@@ -13,7 +14,17 @@ const SvnClient = "GoSVN/0.0.0"
 
 // A Client is a SVN client.  Its zero value is not usable: you will have
 // to create it and connect it to a server using [Connect].
+//
+// A Client is safe for concurrent use by multiple goroutines: each RPC
+// method (GetLatestRev, Stat, List, GetFile, Log) runs to completion under
+// an internal lock, so concurrent calls can't interleave their reads and
+// writes and corrupt the connection. The protocol itself has no way to
+// pipeline or multiplex commands over one connection, though, so this
+// buys safety, not parallelism: concurrent calls still run one at a time,
+// queued behind each other. For real concurrency, use a pool of Clients
+// instead of sharing one.
 type Client struct {
+	mu   sync.Mutex
 	conn conn
 	cmd  *exec.Cmd
 	// Info holds the repository information (UUID, root URL, capabilities)
@@ -228,6 +239,8 @@ func sendCommand[Output any](c *Client, cmd string, params any) (Output, error) 
 // GetLatestRev sends a "get-latest-rev" command, asking for
 // the latest revision number in the repository.
 func (c *Client) GetLatestRev() (int, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	return sendCommand[int](c, "get-latest-rev", []any{})
 }
 
@@ -235,6 +248,8 @@ func (c *Client) GetLatestRev() (int, error) {
 // the latest revision if rev is nil. If path does not exist at that
 // revision, it returns an error satisfying errors.Is(err, fs.ErrNotExist).
 func (c *Client) Stat(path string, rev *int) (Stat, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	lrev := []int{}
 	if rev != nil {
 		lrev = append(lrev, *rev)
@@ -272,6 +287,8 @@ func (c *Client) Stat(path string, rev *int) (Stat, error) {
 // Dirent.Kind is always present in the result, but comes back as "unknown"
 // unless "kind" is included in fields too.
 func (c *Client) List(path string, rev *int, depth string, fields []string) ([]Dirent, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	lrev := []int{}
 	if rev != nil {
 		lrev = append(lrev, *rev)
@@ -330,6 +347,8 @@ func (c *Client) List(path string, rev *int, depth string, fields []string) ([]D
 // is true; content is read and returned in full only if wantContent is
 // true, otherwise the returned []byte is nil.
 func (c *Client) GetFile(path string, rev *int, wantProps bool, wantContent bool) ([]PropList, []byte, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	lrev := []int{}
 	if rev != nil {
 		lrev = append(lrev, *rev)
@@ -393,6 +412,8 @@ func (c *Client) GetFile(path string, rev *int, wantProps bool, wantContent bool
 // for the full history of the repository root. changedPaths reports
 // whether each returned LogEntry.Changed should be populated.
 func (c *Client) Log(paths []string, startRev *int, endRev *int, changedPaths bool) ([]LogEntry, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	srev := []int{}
 	if startRev != nil {
 		srev = append(srev, *startRev)

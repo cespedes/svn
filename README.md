@@ -77,11 +77,12 @@ fsys := svnfs.New(c, nil) // nil rev: always the latest revision
 http.Handle("/", http.FileServerFS(fsys))
 ```
 
-A `svn.Client` serializes one request at a time over a single connection and
-has no locking of its own, so an `FS` is only as safe for concurrent use as
-the `Client` behind it -- share one per goroutine, or serialize access with
-a mutex or a connection pool, rather than sharing one `Client` across
-concurrent requests directly.
+A single `svn.Client` (and any `FS` built on it) is safe to share across
+goroutines: it locks around each command internally. That buys safety, not
+parallelism, though -- the protocol has no way to pipeline or multiplex
+commands over one connection, so concurrent requests still run one at a
+time, queued behind each other. For real concurrency, use a pool of
+`Client`s (one connection each) instead of sharing one.
 
 ## Command-line client: go-svn
 

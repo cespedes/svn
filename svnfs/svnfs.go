@@ -19,11 +19,13 @@ import (
 // FS adapts a [svn.Client] into a read-only [io/fs.FS], rooted at whatever
 // directory the client is connected to, at a fixed revision.
 //
-// FS is only as safe for concurrent use as the underlying Client is: a
-// [svn.Client] serializes commands one at a time over a single connection,
-// with no locking of its own, so concurrent calls into an FS sharing one
-// Client must be serialized by the caller (e.g. with a mutex, or a pool of
-// one FS/Client pair per goroutine) instead.
+// FS is safe for concurrent use by multiple goroutines, to the same extent
+// its underlying Client is: a [svn.Client] locks around each command, so
+// concurrent Open/Stat/ReadDir/ReadFile calls sharing one Client won't
+// corrupt the connection, but they still only run one at a time (the
+// protocol has no way to pipeline or multiplex commands over a single
+// connection). For real concurrency rather than just safety, use a pool of
+// FS/Client pairs instead of sharing one.
 type FS struct {
 	Client *svn.Client
 	// Rev pins every operation to a specific revision. A nil Rev means

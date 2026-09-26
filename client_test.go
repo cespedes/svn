@@ -2,7 +2,9 @@ package svn
 
 import (
 	"fmt"
+	"io"
 	"net"
+	"sync"
 	"testing"
 )
 
@@ -333,4 +335,62 @@ func TestNewClient(t *testing.T) {
 
 	clientSide.Close()
 	<-done
+}
+
+// TestClientConcurrentUse drives many goroutines through the same Client
+// at once, calling two different RPCs, against a real Server on the other
+// end of an in-memory connection. Without Client's internal locking, this
+// reliably corrupts the wire (interleaved writes, reads landing on the
+// wrong response) and either errors or hangs; run with -race, it also
+// catches the underlying data race on conn's internal Itemizer directly.
+func TestClientConcurrentUse(t *testing.T) {
+	clientSide, serverSide := net.Pipe()
+	defer serverSide.Close()
+
+	var server Server
+	server.GetLatestRev = func() (int, error) { return 42, nil }
+	server.Stat = func(path string, rev *uint) (Dirent, error) {
+		return Dirent{Kind: "file", CreatedRev: 1}, nil
+	}
+
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- server.Serve(serverSide, serverSide) }()
+
+	c, err := NewClient(clientSide, clientSide, "svn+ssh://example.com/repo")
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	const n = 30
+	errs := make(chan error, 2*n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			if rev, err := c.GetLatestRev(); err != nil {
+				errs <- fmt.Errorf("GetLatestRev: %w", err)
+			} else if rev != 42 {
+				errs <- fmt.Errorf("GetLatestRev() = %d, want 42", rev)
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			if stat, err := c.Stat("", nil); err != nil {
+				errs <- fmt.Errorf("Stat: %w", err)
+			} else if stat.Kind != "file" {
+				errs <- fmt.Errorf("Stat().Kind = %q, want %q", stat.Kind, "file")
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Error(err)
+	}
+
+	clientSide.Close()
+	if err := <-serveErr; err != io.EOF {
+		t.Fatalf("Serve: %v", err)
+	}
 }
