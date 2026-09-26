@@ -7,12 +7,55 @@ This package provides client and server implementations of the
 in Go: the wire protocol `svnserve` and `svn+ssh://` URLs use, as opposed to
 the HTTP-based `http://`/`https://` (DAV) protocol.
 
-This is a work in progress, and it is in a very early stage. On the client
-side, connecting, `get-latest-rev`, `stat`, `list`, `get-file` and `log`
-already work; `update` and the report commands it depends on are not
-implemented yet. The server side lets you plug in handlers for the same set
-of read commands; there is no support yet for commits or for driving an
-update/report exchange.
+This is a work in progress, and it is in a very early stage: it only covers
+a subset of ra_svn, described in detail below.
+
+## Protocol coverage
+
+This package implements the **read-only, unversioned-property, non-locking**
+part of ra_svn: browsing and reading a repository at a given revision. It
+does not implement commits, checkout/update (and so nothing that depends on
+it, like `diff` or `blame`), locking, or revision properties. There is no
+support for `svn://`'s raw TCP transport (only `file://` and `svn+ssh://`,
+which both exec `svnserve -t` — see below) or for the HTTP-based (DAV)
+protocol, and the only auth mechanisms implemented are `ANONYMOUS` and
+`EXTERNAL` (no password/`CRAM-MD5` auth) — both client and server assume
+either anonymous access or a transport that already authenticated the
+connection (e.g. `svn+ssh://`'s SSH layer).
+
+Concretely, this is what works and what doesn't, on each side:
+
+### Client (`svn.Client`, `go-svn`)
+
+| `svn` subcommand equivalent | Works? | Notes |
+| --- | --- | --- |
+| `info` | ✅ | `GetLatestRev` + `Stat` |
+| `cat` | ✅ | `GetFile` |
+| `ls` | ✅ | `List`; only "immediates" depth has been exercised — recursive listing depends on the server understanding other `depth` values, which `List` merely passes through |
+| `log` | ✅ | `Log`, including `-r`/revision ranges |
+| `checkout` / `update` / `switch` | ❌ | needs the report/editor exchange, not implemented on the client side |
+| `diff` / `blame` (`praise`) | ❌ | needs `update`/`get-file-revs`, neither implemented |
+| `propget` / `proplist` on a file | partial | `GetFile`'s properties are returned if requested; there's no dedicated single-property call |
+| `propget` / `proplist` on a directory | ❌ | |
+| `lock` / `unlock` | ❌ | |
+| `commit` / `add` / `delete` / `mkdir` / `import` | ❌ | no write support at all |
+| `mergeinfo` | ❌ | |
+
+### Server (`svn.Server`)
+
+| Command a client sends | Handled? | Notes |
+| --- | --- | --- |
+| `get-latest-rev`, `stat`, `check-path`, `list`, `get-file`, `log` | ✅ | one callback field each; a `nil` field replies "unimplemented" |
+| `set-path`, `update` | callbacks invoked, but incomplete | called with the parsed arguments, but there's no way to report back a result: driving the actual update requires the report/editor command sequence below, which isn't implemented |
+| `delete-path`, `link-path` (the rest of the report command set) | ❌ | not handled: replies "Unknown command" |
+| `commit` and the write-side editor commands | ❌ | no case for `commit` at all |
+| `lock`, `unlock`, `get-lock`, `get-locks` | ❌ | |
+| `rev-prop`, `rev-proplist`, `change-rev-prop` | ❌ | |
+| `get-dated-rev`, `get-mergeinfo`, `get-file-revs`, `replay`, `replay-range`, `get-deleted-rev`, `get-iprops` | ❌ | |
+
+In practice: a real `svn info`/`ls`/`cat`/`log` against a `svn.Server`
+implementation works (confirmed against a real `svn` client — see
+[Development](#development)); `svn checkout`/`update`/`commit` do not.
 
 ## Installation
 
