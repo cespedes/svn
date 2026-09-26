@@ -7,6 +7,8 @@ import (
 	"io"
 	"net/url"
 	"os"
+	"path"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -53,11 +55,14 @@ func run(args []string, stdout io.Writer) error {
 		help(stdout)
 		return nil
 	}
-	if len(args) != 2 {
+	if len(args) < 2 {
 		return fmt.Errorf("type 'go-svn help' for usage")
 	}
 	switch args[0] {
 	case "info":
+		if len(args) != 2 {
+			return errors.New("subcommand 'info' takes exactly one argument (repo URL)")
+		}
 		if verbose {
 			return errors.New("subcommand 'info' does not accept option '-v'")
 		}
@@ -66,6 +71,9 @@ func run(args []string, stdout io.Writer) error {
 		}
 		return svnInfo(args[1], lrev1, stdout)
 	case "cat":
+		if len(args) != 2 {
+			return errors.New("subcommand 'cat' takes exactly one argument (repo URL)")
+		}
 		if verbose {
 			return errors.New("subcommand 'info' does not accept option '-v'")
 		}
@@ -74,12 +82,30 @@ func run(args []string, stdout io.Writer) error {
 		}
 		return svnCat(args[1], lrev1, stdout)
 	case "ls":
+		if len(args) != 2 {
+			return errors.New("subcommand 'ls' takes exactly one argument (repo URL)")
+		}
 		if lrev2 != nil {
 			return errors.New("subcommand 'ls' does not accept revision range")
 		}
 		return svnLs(args[1], lrev1, verbose, stdout)
 	case "log":
+		if len(args) != 2 {
+			return errors.New("subcommand 'log' takes exactly one argument (repo URL)")
+		}
 		return svnLog(args[1], lrev1, lrev2, verbose, stdout)
+	case "export":
+		if len(args) > 3 {
+			return errors.New("subcommand 'export' takes a repo URL and, optionally, a destination directory")
+		}
+		if lrev2 != nil {
+			return errors.New("subcommand 'export' does not accept revision range")
+		}
+		dest := ""
+		if len(args) == 3 {
+			dest = args[2]
+		}
+		return svnExport(args[1], lrev1, dest, stdout)
 	default:
 		return fmt.Errorf(`unknown subcommand: '%s'
 Type 'svn help' for usage`, args[0])
@@ -247,6 +273,176 @@ func svnLog(repo string, lrev1 *int, lrev2 *int, verbose bool, stdout io.Writer)
 	return nil
 }
 
+// svnExport writes a clean copy of repo at lrev (nil meaning the latest
+// revision) to dest, with no version-control metadata -- the same thing
+// "svn export" does. If dest is empty, it defaults to the last path
+// segment of repo's URL, matching a real svn client.
+func svnExport(repo string, lrev *int, dest string, stdout io.Writer) error {
+	c, err := svn.Connect(repo)
+	if err != nil {
+		return err
+	}
+
+	if dest == "" {
+		dest, err = defaultExportDest(repo)
+		if err != nil {
+			return err
+		}
+	}
+
+	// A real svnserve's "list" response always uses full,
+	// repository-root-relative paths (see Server.List's own doc
+	// comment), regardless of where the client's own session is
+	// anchored -- so if repo points below the repository root (e.g.
+	// ".../reponame/trunk"), every Dirent.Path exportDir sees below is
+	// prefixed with "trunk", which anchor supplies for matching.
+	anchor, err := repoRootRelativePath(c, repo)
+	if err != nil {
+		return err
+	}
+
+	stat, err := c.Stat("", lrev)
+	if err != nil {
+		return err
+	}
+
+	switch stat.Kind {
+	case "file":
+		if err := exportFile(c, "", lrev, dest); err != nil {
+			return err
+		}
+		fmt.Fprintf(stdout, "A    %s\n", dest)
+	case "dir":
+		if err := os.Mkdir(dest, 0o755); err != nil {
+			return fmt.Errorf("export: %w", err)
+		}
+		if err := exportDir(c, "", anchor, lrev, dest, stdout); err != nil {
+			return err
+		}
+	default:
+		return fmt.Errorf("export: %s: unsupported node kind %q", repo, stat.Kind)
+	}
+
+	rev := lrev
+	if rev == nil {
+		latest, err := c.GetLatestRev()
+		if err != nil {
+			return err
+		}
+		rev = &latest
+	}
+	fmt.Fprintf(stdout, "Exported revision %d.\n", *rev)
+	return nil
+}
+
+// defaultExportDest derives the local directory name "svn export" uses
+// when no destination is given explicitly: the last path segment of
+// repo's own URL.
+func defaultExportDest(repo string) (string, error) {
+	u, err := url.Parse(repo)
+	if err != nil {
+		return "", fmt.Errorf("export: parsing URL: %w", err)
+	}
+	name := path.Base(strings.TrimSuffix(u.Path, "/"))
+	if name == "" || name == "." || name == "/" {
+		return "", errors.New("export: cannot determine a local directory name from the URL; specify one explicitly")
+	}
+	return name, nil
+}
+
+// repoRootRelativePath returns repo's own path relative to the
+// repository root Connect discovered (c.Info.URL) -- e.g. "trunk" if
+// repo pointed at ".../reponame/trunk". It is "" if repo points at the
+// repository root itself.
+func repoRootRelativePath(c *svn.Client, repo string) (string, error) {
+	root, err := url.Parse(c.Info.URL)
+	if err != nil {
+		return "", fmt.Errorf("export: parsing repository root URL %q: %w", c.Info.URL, err)
+	}
+	given, err := url.Parse(strings.TrimSuffix(repo, "/"))
+	if err != nil {
+		return "", fmt.Errorf("export: parsing URL: %w", err)
+	}
+	rootPath := strings.TrimSuffix(root.Path, "/")
+	if !strings.HasPrefix(given.Path, rootPath) {
+		// Should not happen: Connect resolved repo to this very root.
+		return "", fmt.Errorf("export: %q is not under repository root %q", repo, c.Info.URL)
+	}
+	return strings.Trim(given.Path[len(rootPath):], "/"), nil
+}
+
+// joinNonEmpty joins a and b with "/", except that either being "" just
+// yields the other -- unlike path.Join, it never collapses "" into ".".
+func joinNonEmpty(a, b string) string {
+	switch {
+	case a == "":
+		return b
+	case b == "":
+		return a
+	default:
+		return a + "/" + b
+	}
+}
+
+// exportDir recursively writes every child of svnPath (at rev) under
+// destPath, which must already exist, printing one "A    path" line per
+// file or directory written -- the same shape a real "svn export"
+// prints. anchor is svnPath's own repository-root-relative form (see
+// repoRootRelativePath), needed to match each returned Dirent.Path back
+// to a bare child name.
+func exportDir(c *svn.Client, svnPath, anchor string, rev *int, destPath string, stdout io.Writer) error {
+	entries, err := c.List(svnPath, rev, "immediates", []string{"kind"})
+	if err != nil {
+		return err
+	}
+	fullDirPath := joinNonEmpty(anchor, svnPath)
+	// Server.List always includes the queried directory itself as one of
+	// the entries (see Server.List's own doc comment); filter it out by
+	// this exact match, then strip the same prefix from every other
+	// entry to recover its bare child name.
+	selfPath := "/" + fullDirPath
+	for _, entry := range entries {
+		if entry.Path == selfPath {
+			continue
+		}
+		name := strings.TrimPrefix(entry.Path, "/")
+		if fullDirPath != "" {
+			name = strings.TrimPrefix(name, fullDirPath+"/")
+		}
+		if name == "" {
+			continue
+		}
+		childSvnPath, childDest := joinNonEmpty(svnPath, name), filepath.Join(destPath, name)
+		switch entry.Kind {
+		case "dir":
+			if err := os.Mkdir(childDest, 0o755); err != nil {
+				return fmt.Errorf("export: %w", err)
+			}
+			fmt.Fprintf(stdout, "A    %s\n", childDest)
+			if err := exportDir(c, childSvnPath, anchor, rev, childDest, stdout); err != nil {
+				return err
+			}
+		case "file":
+			if err := exportFile(c, childSvnPath, rev, childDest); err != nil {
+				return err
+			}
+			fmt.Fprintf(stdout, "A    %s\n", childDest)
+		default:
+			return fmt.Errorf("export: %s: unsupported node kind %q", childSvnPath, entry.Kind)
+		}
+	}
+	return nil
+}
+
+// exportFile writes svnPath's content (at rev) to destPath.
+func exportFile(c *svn.Client, svnPath string, rev *int, destPath string) error {
+	_, content, err := c.GetFile(svnPath, rev, false, true)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(destPath, content, 0o644)
+}
+
 func help(stdout io.Writer) {
 	fmt.Fprintln(stdout, `usage: go-svn [-v] [-r revision[:revision2]] <subcommand> <repo>
 
@@ -255,6 +451,7 @@ Available subcommands:
    cat
    ls
    log
+   export <repo> [localdir]
 
 go-svn is a client for the Subversion protocol.`)
 }

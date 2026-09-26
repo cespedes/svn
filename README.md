@@ -13,10 +13,12 @@ a subset of ra_svn, described in detail below.
 ## Protocol coverage
 
 This package implements the **read-only, unversioned-property, non-locking**
-part of ra_svn: browsing and reading a repository at a given revision. It
-does not implement commits, checkout/update (and so nothing that depends on
-it, like `diff` or `blame`), locking, or revision properties. There is no
-support for `svn://`'s raw TCP transport (only `file://` and `svn+ssh://`,
+part of ra_svn: browsing and reading a repository at a given revision, plus
+serving a plain `svn checkout` (`svn.Server` only -- see below). It does
+not implement commits, a real `update`/`switch` against an existing working
+copy (and so nothing that depends on that, like `diff` or `blame`), locking,
+or revision properties. There is no support for `svn://`'s raw TCP
+transport (only `file://` and `svn+ssh://`,
 which both exec `svnserve -t` — see below) or for the HTTP-based (DAV)
 protocol, and the only auth mechanisms implemented are `ANONYMOUS` and
 `EXTERNAL` (no password/`CRAM-MD5` auth) — both client and server assume
@@ -35,6 +37,7 @@ of this same table):
 | `cat` | ✅ | `GetFile` |
 | `ls` | ✅ | `List`; only "immediates" depth has been exercised — recursive listing depends on the server understanding other `depth` values, which `List` merely passes through |
 | `log` | ✅ | `Log`, including `-r`/revision ranges |
+| `export` | ✅ | recursive `List` + `GetFile` walk (`go-svn export <repo> [localdir]`), no report/editor exchange needed since it doesn't create a working copy |
 | `checkout` / `update` / `switch` | ❌ | needs the report/editor exchange, not implemented on the client side |
 | `diff` / `blame` (`praise`) | ❌ | needs `update`/`get-file-revs`, neither implemented |
 | `propget` / `proplist` on a file | partial | `GetFile`'s properties are returned if requested; there's no dedicated single-property call |
@@ -144,12 +147,16 @@ go-svn info svn+ssh://example.com/repo
 go-svn cat svn+ssh://example.com/repo/trunk/README
 go-svn -v ls svn+ssh://example.com/repo/trunk
 go-svn -r 100:200 log svn+ssh://example.com/repo
+go-svn export svn+ssh://example.com/repo/trunk
 ```
 
 Usage: `go-svn [-v] [-r revision[:revision2]] <subcommand> <repo>`.
-Subcommands: `info`, `cat`, `ls`, `log`. `-r rev` or `-r rev1:rev2` selects a
-revision or revision range where the subcommand supports it, and `-v` asks
-for more detail (`ls`, `log`).
+Subcommands: `info`, `cat`, `ls`, `log`, `export <repo> [localdir]`. `-r rev`
+or `-r rev1:rev2` selects a revision or revision range where the subcommand
+supports it, and `-v` asks for more detail (`ls`, `log`). `export` writes a
+clean copy of `repo` (no version-control metadata) to `localdir`, or to a
+directory named after `repo`'s own last path segment if `localdir` is
+omitted.
 
 ## Other examples
 
