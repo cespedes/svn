@@ -108,7 +108,7 @@ func itemsNamed(items []Item, command string) map[string]Item {
 // added.
 func TestUpdateEditTreeShape(t *testing.T) {
 	s := newUpdateFakeServer()
-	items, err := s.UpdateEdit("", 1, 2)
+	items, err := s.UpdateEdit("", "", 1, 2)
 	if err != nil {
 		t.Fatalf("UpdateEdit: %v", err)
 	}
@@ -209,5 +209,60 @@ func TestIsSingleRevisionUpdate(t *testing.T) {
 				t.Errorf("IsSingleRevisionUpdate(%+v) = (%d, %v), want (%d, %v)", tt.report, rev, ok, tt.wantRev, tt.wantOk)
 			}
 		})
+	}
+}
+
+// TestUpdateEditMultiSegmentTarget checks that UpdateEdit, given a
+// multi-segment target (e.g. "trunk/main.go", the shape a Server.Diff
+// callback needs to compute via RepoRelativePath when it reuses a
+// session anchored above the target's own parent -- see UpdateEdit's own
+// doc comment), navigates down to just that one file without describing
+// any directory strictly between path and it: no open-dir/add-dir, no
+// entry-props, for "trunk" itself. Confirmed the hard way: describing an
+// intermediate directory produces a bogus, doubled local path (e.g.
+// ".../trunk/trunk/main.go") that a real client rejects outright once it
+// tries to apply the edit.
+func TestUpdateEditMultiSegmentTarget(t *testing.T) {
+	s := newUpdateFakeServer()
+	items, err := s.UpdateEdit("", "trunk/main.go", 1, 2)
+	if err != nil {
+		t.Fatalf("UpdateEdit: %v", err)
+	}
+
+	for _, it := range items {
+		if it.Type == ListType && len(it.List) == 2 {
+			if it.List[0].Text == "open-dir" || it.List[0].Text == "add-dir" {
+				t.Errorf("unexpected %s for an intermediate directory: %s", it.List[0].Text, it)
+			}
+		}
+	}
+
+	openFiles := itemsNamed(items, "open-file")
+	mainGo, ok := openFiles["main.go"]
+	if !ok {
+		t.Fatalf("main.go was not open-file'd directly as a child of the root (items:\n%s)", itemLines(items))
+	}
+	if got := mainGo.List[1].List[3].List[0].Number; got != 1 {
+		t.Errorf("open-file main.go rev = %d, want 1 (the client's own baseline)", got)
+	}
+
+	token := mainGo.List[1].List[2].Text
+	var chunk *Item
+	for _, it := range items {
+		if it.Type == ListType && len(it.List) == 2 && it.List[0].Text == "textdelta-chunk" && it.List[1].List[0].Text == token {
+			c := it
+			chunk = &c
+			break
+		}
+	}
+	if chunk == nil {
+		t.Fatalf("no textdelta-chunk found for main.go (token %q)", token)
+	}
+	got, err := decodeSvndiff(nil, []byte(chunk.List[1].List[1].Text))
+	if err != nil {
+		t.Fatalf("decodeSvndiff: %v", err)
+	}
+	if want := "package main\n\nfunc main() {}\n"; string(got) != want {
+		t.Errorf("content = %q, want %q", got, want)
 	}
 }

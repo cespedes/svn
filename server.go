@@ -104,6 +104,25 @@ type Server struct {
 	// hands to FinishReport -- see FinishReport.
 	Update func(rev *uint, target string, recurse bool)
 
+	// Diff is called for a "diff" command, with the client's requested
+	// comparison revision (nil meaning the latest), the target path
+	// within the repository, whether to recurse, whether to ignore
+	// ancestry (copy history) when matching paths, the URL to compare
+	// against (a real client sends the same URL it connected to, for a
+	// same-path, two-revision diff; anything else needs target-selection
+	// logic this package does not implement), whether the client wants
+	// full text deltas, and the requested depth. Like Update, it has no
+	// return value: the actual result is driven by the same report/
+	// editor exchange that follows "update" (set-path, ...,
+	// finish-report) -- a Server.FinishReport that already handles
+	// "update" via IsSingleRevisionUpdate/UpdateEdit needs no separate
+	// logic for "diff": the accumulated report looks identical either
+	// way, and the editor sequence UpdateEdit builds (open/add/delete/
+	// modify against a second revision) is exactly what a real client
+	// needs to compute a diff for itself, having kept the "from"
+	// revision's content locally instead of overwriting it.
+	Diff func(rev *uint, target string, recurse bool, ignoreAncestry bool, versusURL string, textDeltas bool, depth string)
+
 	// SetPath is called for a "set-path" command, part of the report
 	// mechanism a client uses to describe what it already has before an
 	// update. It is purely informational: Serve records every set-path
@@ -382,6 +401,84 @@ func (s *Server) Serve(r io.Reader, w io.Writer) error {
 			if err = conn.WriteSuccess([]any{}); err != nil {
 				return err
 			}
+		case "get-dir":
+			// params: ( path:string [ rev:number ] want-props:bool
+			//   want-contents:bool ? ( field:dirent-field ... )
+			//   ? want-iprops:bool )
+			// response: ( rev:number props:proplist ( entry:dirent ... )
+			//   [ inherited-props:iproplist ] )
+			// dirent: ( name:string kind:word size:number has-props:bool
+			//   created-rev:number [ created-date:string ]
+			//   [ last-author:string ] )
+			//
+			// The older, pre-"list" way to read a directory's children.
+			// A modern client generally uses "list" instead (see
+			// Server.List's own doc comment), but "svn diff" still falls
+			// back to this to enumerate a deleted directory's former
+			// contents, so it can describe every file that disappeared
+			// along with it -- confirmed by a real client sending this
+			// in exactly that situation, despite this package always
+			// advertising the "list" capability. Answered entirely in
+			// terms of Server.List: a directory's own properties are
+			// always reported empty (the same simplification
+			// "get-iprops" already makes), and, unlike "list", every
+			// dirent field is always populated, regardless of which
+			// ones the client actually asked for.
+			if s.List == nil {
+				if err = replyUnimplemented(conn, command.Name); err != nil {
+					return err
+				}
+				continue
+			}
+			var args struct {
+				Path         string
+				Rev          *uint
+				WantProps    bool
+				WantContents bool
+				Fields       []string
+				WantIProps   bool
+			}
+			if err = Unmarshal(command.Params, &args); err != nil {
+				if err = conn.WriteFailure(neterr); err != nil {
+					return err
+				}
+				continue
+			}
+			entries, err := s.List(args.Path, args.Rev, "immediates",
+				[]string{"kind", "size", "created-rev", "time", "last-author"}, nil)
+			if err != nil {
+				if err = conn.WriteFailure(err); err != nil {
+					return err
+				}
+				continue
+			}
+			self, children := splitCheckoutEntries(entries)
+			var dirRev uint
+			var selfPath string
+			if self != nil {
+				dirRev = self.CreatedRev
+				selfPath = self.Path
+			}
+			dirents := []any{}
+			if args.WantContents {
+				for _, c := range children {
+					dirents = append(dirents, []any{
+						[]byte(childName(c, selfPath)),
+						c.Kind,
+						c.Size,
+						c.HasProps,
+						c.CreatedRev,
+						[]any{[]byte(c.CreatedDate)},
+						[]any{[]byte(c.LastAuthor)},
+					})
+				}
+			}
+			if err = conn.WriteSuccess([]any{[]any{}, []byte{}}); err != nil {
+				return err
+			}
+			if err = conn.WriteSuccess([]any{dirRev, []any{}, dirents}); err != nil {
+				return err
+			}
 		case "check-path":
 			// params: ( path:string [ rev:number ] )
 			if s.CheckPath == nil {
@@ -588,6 +685,44 @@ func (s *Server) Serve(r io.Reader, w io.Writer) error {
 			}
 			s.Update(args.Rev, args.Target, args.Recurse)
 			// empty auth-request:
+			if err = conn.WriteSuccess([]any{[]any{}, []byte{}}); err != nil {
+				return err
+			}
+		case "diff":
+			// params: ( [ rev:number ] target:string recurse:bool
+			//   ignore-ancestry:bool url:string ? text-deltas:bool
+			//   ? depth:word )
+			if s.Diff == nil {
+				if err = replyUnimplemented(conn, command.Name); err != nil {
+					return err
+				}
+				continue
+			}
+			var args struct {
+				Rev            *uint
+				Target         string
+				Recurse        bool
+				IgnoreAncestry bool
+				VersusURL      string
+				TextDeltas     bool
+				Depth          string
+			}
+			if err = Unmarshal(command.Params, &args); err != nil {
+				if err = conn.WriteFailure(neterr); err != nil {
+					return err
+				}
+				continue
+			}
+			s.Diff(args.Rev, args.Target, args.Recurse, args.IgnoreAncestry, args.VersusURL, args.TextDeltas, args.Depth)
+			// empty auth-request: acked immediately, exactly like
+			// "update" -- confirmed by raw wire capture, reading right
+			// after sending "diff" and before sending "set-path" (a
+			// first attempt assumed this ack was deferred until
+			// "finish-report", from a capture that sent set-path and
+			// finish-report before reading anything at all, which
+			// couldn't actually tell the two apart; a real client left
+			// waiting for this ack immediately, since it never comes
+			// with that assumption, is what caught the mistake).
 			if err = conn.WriteSuccess([]any{[]any{}, []byte{}}); err != nil {
 				return err
 			}

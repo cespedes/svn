@@ -24,14 +24,14 @@ These are the commands a client sends to ask the server to do something.
 | `rev-prop` | ❌ | ❌ | |
 | `commit` | ❌ | ❌ | no write support anywhere in this package |
 | `get-file` | ✅ | ✅ | `Client.GetFile`; `server.go`'s `"get-file"` case |
-| `get-dir` | ❌ | ❌ | superseded by `list` (below), which both sides use instead; `Server.Serve` always advertises the `list` capability, so a modern client won't send `get-dir` anyway |
+| `get-dir` | ❌ | ✅ | superseded by `list`, which `server.go`'s own directory-listing code uses internally too (this case is a thin wrapper around `Server.List`) -- a modern client generally sends `list` instead, but `svn diff` still falls back to `get-dir` to enumerate a deleted directory's former contents, despite `Server.Serve` always advertising the `list` capability |
 | `check-path` | ❌ | ✅ | `Server.CheckPath` callback exists and is wired up, but `Client` has no method to send this command |
 | `stat` | ✅ | ✅ | `Client.Stat`; `server.go`'s `"stat"` case. See the README's note on this command's real, twice-nested wire shape |
 | `get-mergeinfo` | ❌ | ❌ | |
 | `update` | ❌ | ✅ for a checkout or a single-revision update | `Server.Update` callback is invoked with the parsed arguments and has no return value, but the report/editor exchange that follows (`set-path`, ..., `finish-report`) now drives a real, working "svn checkout" or "svn update" (for a working copy that isn't "mixed revision") -- see the Report/Editor Command Set sections below. `Client` has no method to send this command at all |
 | `switch` | ❌ | ❌ | needs the same report/editor exchange as `update`, plus target-selection logic (diffing against a *different* path, not just a newer revision of the same one) |
 | `status` | ❌ | ❌ | note: this is the wire command a real client uses to compute local status, unrelated to this package's own `Server` type name |
-| `diff` | ❌ | ❌ | |
+| `diff` | ❌ | ✅ for a single-revision comparison | `Server.Diff` callback is invoked with the parsed arguments and has no return value; the report/editor exchange that follows drives the diff, via the exact same `IsSingleRevisionUpdate`/`UpdateEdit` machinery "update" uses (the accumulated report looks identical either way -- see the Report/Editor Command Set sections below). `Client` has no method to send this command at all |
 | `log` | ✅ | ✅ | `Client.Log`; `server.go`'s `"log"` case |
 | `get-locations` | ❌ | ❌ | used by `svn blame`'s history-following across renames |
 | `get-location-segments` | ❌ | ❌ | |
@@ -61,7 +61,7 @@ reach `finish-report`.
 | `set-path` | ❌ | ⚠️ | `Serve` accumulates every `set-path` call into a `[]ReportedPath`, passed to `FinishReport` once the report ends; `Server.SetPath` itself is optional and purely informational (e.g. logging) -- it does not need to be set for the accumulation to happen |
 | `delete-path` | ❌ | ❌ | no case in `server.go`'s switch: replies "Unknown command"; not yet folded into `ReportedPath` accumulation |
 | `link-path` | ❌ | ❌ | same |
-| `finish-report` | ❌ | ✅ for a checkout or a single-revision update | `Server.FinishReport` callback receives the accumulated `[]ReportedPath`; for the shape `IsPlainCheckout` recognizes, `Server.CheckoutEdit` builds the resulting `[]Item` automatically, and for the shape `IsSingleRevisionUpdate` recognizes (a working copy that isn't "mixed revision"), `Server.UpdateEdit` does, by diffing the client's revision against the target one (see the Editor Command Set section below) -- a mixed-revision report still needs a caller-supplied `EditorWriter` sequence |
+| `finish-report` | ❌ | ✅ for a checkout, or a single-revision update/diff | `Server.FinishReport` callback receives the accumulated `[]ReportedPath`; for the shape `IsPlainCheckout` recognizes, `Server.CheckoutEdit` builds the resulting `[]Item` automatically, and for the shape `IsSingleRevisionUpdate` recognizes (a working copy that isn't "mixed revision"), `Server.UpdateEdit` does, by diffing the client's revision against the target one (see the Editor Command Set section below) -- this same shape, and so the same `IsSingleRevisionUpdate`/`UpdateEdit` call, is what a "diff" command's report reduces to as well. A mixed-revision report still needs a caller-supplied `EditorWriter` sequence |
 | `abort-report` | ❌ | ❌ | no case in `server.go`'s switch |
 
 ## Editor Command Set
@@ -83,8 +83,28 @@ of the tree, only describing what changed: `AddDir`/`AddFile` for a new
 node, `DeleteEntry` for a removed one, `OpenDir`/`OpenFile` (not the
 `Add*` variant) plus a fresh `ApplyTextdelta` for a modified one, and
 nothing at all for an unmodified file (confirmed against a real svnserve:
-it's skipped entirely, never even opened). Both are confirmed end to end
-against a real `svn checkout`/`svn update`
+it's skipped entirely, never even opened). `UpdateEdit`'s `target`
+parameter additionally handles a client naming one nested file or
+subdirectory instead of its whole working copy (`svn update path/to/file`,
+`svn diff path/to/file`): every path segment strictly between the
+report's own root and the target is walked (via `List`, to find the
+target and know whether it changed) but never itself described in the
+editor sequence -- no `open-dir`/`add-dir`, no entry-props -- since a real
+client computes the target's own local path by joining every directory
+name it receives and expects the target's parent to coincide with the
+edit's root regardless of how many real path segments separate them;
+describing an intermediate directory instead produces a doubled, bogus
+local path that a real client rejects outright once it tries to apply the
+edit. `target` itself differs in shape between the two commands that set
+it: "update" always anchors a fresh session exactly at the target's own
+parent directory, so its `target` argument reliably names only a single
+path segment, but "diff" often reuses an existing, possibly
+higher-anchored session while still reporting `target` as that same bare
+child name -- so a `Server.Diff` callback needs to recover the target's
+real, possibly multi-segment path itself, typically via `RepoRelativePath`
+(comparing the command's own `versusURL` argument against
+`Server.ReposInfo.URL`). Both are confirmed end to end against a real
+`svn checkout`/`svn update`/`svn diff`, including of a single nested file
 (`TestServerAgainstRealSVNClient` in `server_integration_test.go`).
 `switch` and a mixed-revision `update` still need a caller to drive
 `EditorWriter` itself, since neither is implemented. `close-edit`/

@@ -142,8 +142,27 @@ func newFakeServer() *svn.Server {
 	}
 	server.GetLatestRev = func() (int, error) { return fakeLatestRev, nil }
 	var updateRev *uint
+	var updateTarget string
 	server.Update = func(rev *uint, target string, recurse bool) {
 		updateRev = rev
+		updateTarget = target
+	}
+	server.Diff = func(rev *uint, target string, recurse, ignoreAncestry bool, versusURL string, textDeltas bool, depth string) {
+		// Reuses the same closure variables as Update: FinishReport
+		// drives both "update" and "diff" through the exact same
+		// UpdateEdit call, since the accumulated report looks identical
+		// either way. Unlike Update's own target, a real client's "diff"
+		// doesn't report target relative to whatever session happens to
+		// be open (see svn.RepoRelativePath's own doc comment for why),
+		// so the real target is derived from versusURL instead, then
+		// stripped of this session's own anchor the same way every
+		// other path argument already is.
+		updateRev = rev
+		if rel, err := svn.RepoRelativePath(server.ReposInfo.URL, versusURL); err == nil {
+			updateTarget = strings.TrimPrefix(strings.TrimPrefix(rel, sessionBase), "/")
+		} else {
+			updateTarget = target
+		}
 	}
 	server.Stat = func(path string, rev *uint) (svn.Dirent, error) {
 		tree := fakeTreeAt(effectiveRev(rev))
@@ -247,7 +266,7 @@ func newFakeServer() *svn.Server {
 			return server.CheckoutEdit(report[0].Path, *toRev)
 		}
 		if fromRev, ok := svn.IsSingleRevisionUpdate(report); ok {
-			return server.UpdateEdit(report[0].Path, fromRev, *toRev)
+			return server.UpdateEdit(report[0].Path, updateTarget, fromRev, *toRev)
 		}
 		return nil, fmt.Errorf("fake server: unsupported report shape: %+v", report)
 	}
@@ -444,6 +463,122 @@ func TestServerAgainstRealSVNClient(t *testing.T) {
 		status := run("status", dir)
 		if strings.TrimSpace(status) != "" {
 			t.Errorf("expected a clean status after update, got:\n%s", status)
+		}
+	})
+
+	// "svn diff -r 1:2 URL": the same report/editor exchange as "update",
+	// but starting from a "diff" command instead, which a real svnserve
+	// acks differently on the wire (see newFakeServer's Diff and
+	// TestServerDiffAcksFoldIntoFinishReport). No working copy involved
+	// -- the client keeps rev 1's content in memory and computes the
+	// diff itself from the same editor sequence UpdateEdit already
+	// builds for "update".
+	// "svn diff -r 1:2" against a real working copy: unlike diffing a
+	// bare URL (which drives a second RA session of its own, fetching
+	// the "old" side via "get-dir" -- a command this package doesn't
+	// implement, since Server.Serve already advertises the "list"
+	// capability that supersedes it for every other command that reads a
+	// directory), diffing a working copy uses only the single report/
+	// editor exchange already exercised by "update", since the "old"
+	// side's content is already on disk locally.
+	t.Run("diff", func(t *testing.T) {
+		dir := t.TempDir()
+		run("checkout", "-r", "1", "-q", repoURL, dir)
+		out := run("diff", "-r", "1:2", dir)
+		if !strings.Contains(out, "trunk/main.go") || !strings.Contains(out, "+func main() {}") {
+			t.Errorf("diff output missing trunk/main.go's change:\n%s", out)
+		}
+		if !strings.Contains(out, "trunk/newfile.go") || !strings.Contains(out, "+func New() {}") {
+			t.Errorf("diff output missing the added trunk/newfile.go:\n%s", out)
+		}
+		if !strings.Contains(out, "trunk/sub/nested.txt") || !strings.Contains(out, "-nested") {
+			t.Errorf("diff output missing the deleted trunk/sub/nested.txt:\n%s", out)
+		}
+		if !strings.Contains(out, "trunk/newdir/inside.txt") || !strings.Contains(out, "+inside") {
+			t.Errorf("diff output missing the added trunk/newdir/inside.txt:\n%s", out)
+		}
+		if strings.Contains(out, "README.md") {
+			t.Errorf("diff output mentions README.md, which is unchanged between r1 and r2:\n%s", out)
+		}
+	})
+
+	// "svn diff"/"svn update" of a single nested FILE (not a directory,
+	// and not the whole working copy/repository): previously produced
+	// silent empty output ("diff") or an outright "not a directory"
+	// failure ("update"), since UpdateEdit/CheckoutEdit unconditionally
+	// called List on the report path, which a file can never satisfy.
+	// Both the working-copy form of "diff" (the server sees the report/
+	// editor exchange run on the checkout's own already-anchored
+	// session) and the bare-URL form (no working copy at all; the
+	// server's session is anchored at the repository root, so the
+	// target's true path is only recoverable via versusURL -- see
+	// RepoRelativePath) are covered here, since each exercises a
+	// different path through newFakeServer's Diff callback.
+	t.Run("diff of a single nested file", func(t *testing.T) {
+		dir := t.TempDir()
+		run("checkout", "-r", "1", "-q", repoURL, dir)
+
+		out := run("diff", "-r", "1:2", filepath.Join(dir, "trunk", "main.go"))
+		if !strings.Contains(out, "trunk/main.go") || !strings.Contains(out, "+func main() {}") {
+			t.Errorf("diff output missing trunk/main.go's change:\n%s", out)
+		}
+		if strings.Contains(out, "newfile.go") || strings.Contains(out, "README.md") {
+			t.Errorf("diff output should only cover trunk/main.go, got:\n%s", out)
+		}
+
+		out = run("diff", "-r", "1:2", repoURL+"trunk/main.go")
+		if !strings.Contains(out, "main.go") || !strings.Contains(out, "+func main() {}") {
+			t.Errorf("URL-form diff output missing main.go's change:\n%s", out)
+		}
+	})
+
+	t.Run("update of a single nested file", func(t *testing.T) {
+		dir := t.TempDir()
+		run("checkout", "-r", "1", "-q", repoURL, dir)
+		run("update", "-q", filepath.Join(dir, "trunk", "main.go"))
+
+		mainGo, err := os.ReadFile(filepath.Join(dir, "trunk", "main.go"))
+		if err != nil {
+			t.Fatalf("reading trunk/main.go: %v", err)
+		}
+		if want := "package main\n\nfunc main() {}\n"; string(mainGo) != want {
+			t.Errorf("trunk/main.go content = %q, want %q", mainGo, want)
+		}
+		if _, err := os.Stat(filepath.Join(dir, "trunk", "newfile.go")); err == nil {
+			t.Errorf("trunk/newfile.go should not have been created by updating just trunk/main.go")
+		}
+	})
+
+	// "svn update" of a single nested DIRECTORY (as opposed to the file
+	// case above): the target itself is a directory, so UpdateEdit must
+	// both resend its entry-props (skipped for path segments strictly
+	// above the target -- see UpdateEdit's own doc comment) and recurse
+	// into its own children normally, exercising the directory branch of
+	// updateNavigateToTarget end to end.
+	t.Run("update of a single nested directory", func(t *testing.T) {
+		dir := t.TempDir()
+		run("checkout", "-r", "1", "-q", repoURL, dir)
+		run("update", "-q", filepath.Join(dir, "trunk"))
+
+		mainGo, err := os.ReadFile(filepath.Join(dir, "trunk", "main.go"))
+		if err != nil {
+			t.Fatalf("reading trunk/main.go: %v", err)
+		}
+		if want := "package main\n\nfunc main() {}\n"; string(mainGo) != want {
+			t.Errorf("trunk/main.go content = %q, want %q", mainGo, want)
+		}
+		if _, err := os.Stat(filepath.Join(dir, "trunk", "sub")); err == nil {
+			t.Errorf("trunk/sub should have been removed by the update")
+		}
+		newfile, err := os.ReadFile(filepath.Join(dir, "trunk", "newfile.go"))
+		if err != nil {
+			t.Fatalf("reading trunk/newfile.go: %v", err)
+		}
+		if want := "package main\n\nfunc New() {}\n"; string(newfile) != want {
+			t.Errorf("trunk/newfile.go content = %q, want %q", newfile, want)
+		}
+		if _, err := os.Stat(filepath.Join(dir, "README.md")); err != nil {
+			t.Errorf("README.md should still be there, untouched by updating just trunk: %v", err)
 		}
 	})
 

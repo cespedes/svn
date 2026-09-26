@@ -14,10 +14,10 @@ a subset of ra_svn, described in detail below.
 
 This package implements the **read-only, unversioned-property, non-locking**
 part of ra_svn: browsing and reading a repository at a given revision, plus
-serving a plain `svn checkout` or a single-revision `svn update`
+serving a plain `svn checkout` or a single-revision `svn update`/`svn diff`
 (`svn.Server` only -- see below). It does not implement commits, `switch`,
-a mixed-revision `update` (and so nothing that depends on that kind of
-thing, like `diff` or `blame`), locking, or revision properties. There is
+a mixed-revision `update`/`diff` (and so nothing that depends on that kind
+of thing, like `blame`), locking, or revision properties. There is
 no support for `svn://`'s raw TCP transport (only `file://` and `svn+ssh://`,
 which both exec `svnserve -t` — see below) or for the HTTP-based (DAV)
 protocol, and the only auth mechanisms implemented are `ANONYMOUS` and
@@ -52,13 +52,14 @@ of this same table):
 | --- | --- | --- |
 | `get-latest-rev`, `stat`, `check-path`, `list`, `get-file`, `log` | ✅ | one callback field each; a `nil` field replies "unimplemented" |
 | `get-iprops` | ✅ | always reports no inherited properties (neither modeled anywhere in this package); not gated behind a callback field, since a real client needs an answer to it to complete even a plain checkout below the repository root |
-| `set-path`, `update`, `finish-report` | ✅ for a checkout or a single-revision update | `Serve` accumulates every `set-path` into a `[]ReportedPath` and hands it to `FinishReport`. `IsPlainCheckout` + `Server.CheckoutEdit` handle a plain checkout (the client has nothing yet), and `IsSingleRevisionUpdate` + `Server.UpdateEdit` handle a real `update` for a working copy that isn't "mixed revision" (every subtree at the same revision): it walks both the client's revision and the target revision via `List`/`GetFile` and describes only what changed -- new/removed/modified nodes -- skipping an unmodified file entirely. A mixed-revision working copy (part of it pinned to an older revision) isn't recognized by either helper |
-| everything else (`delete-path`/`link-path`, most of the editor command set beyond what a checkout/update needs, `commit`, locking, revision properties, `get-mergeinfo`, `get-file-revs`, `replay`, ...) | ❌ | not handled: replies "Unknown command" — see [PROTOCOL.md](PROTOCOL.md) for the full list |
+| `get-dir` | ✅ | a thin wrapper around `Server.List`; superseded by `list` for a modern client's normal directory browsing, but `svn diff` still falls back to it to enumerate a deleted directory's former contents |
+| `set-path`, `update`, `diff`, `finish-report` | ✅ for a checkout or a single-revision update/diff | `Serve` accumulates every `set-path` into a `[]ReportedPath` and hands it to `FinishReport`. `IsPlainCheckout` + `Server.CheckoutEdit` handle a plain checkout (the client has nothing yet), and `IsSingleRevisionUpdate` + `Server.UpdateEdit` handle a real `update` or `diff` for a working copy that isn't "mixed revision" (every subtree at the same revision): it walks both the client's revision and the target revision via `List`/`GetFile` and describes only what changed -- new/removed/modified nodes -- skipping an unmodified file entirely. A `diff` against a bare repository URL (no local working copy) additionally needs `get-dir` (above). `UpdateEdit`'s `target` parameter also handles a client naming a single nested file or subdirectory (`svn update path/to/file`, `svn diff path/to/file`), not just a whole working copy: every path segment strictly between the report's own root and the target is walked but never itself described in the editor sequence, since a real client computes the target's own local path by joining every directory name it receives and expects the target's parent to coincide with the edit's root regardless of how many real path segments separate them (see `UpdateEdit`'s doc comment, and `RepoRelativePath` for how a `diff` callback recovers the target's true path when its session is anchored above the target's own parent). A mixed-revision working copy (part of it pinned to an older revision) isn't recognized by either helper |
+| everything else (`delete-path`/`link-path`, most of the editor command set beyond what a checkout/update/diff needs, `commit`, locking, revision properties, `get-mergeinfo`, `get-file-revs`, `replay`, ...) | ❌ | not handled: replies "Unknown command" — see [PROTOCOL.md](PROTOCOL.md) for the full list |
 
-In practice: a real `svn info`/`ls`/`cat`/`log`/`checkout`/`update` against
-a `svn.Server` implementation works (confirmed against a real `svn` client
-— see [Development](#development)), as long as the working copy isn't
-"mixed revision"; `svn switch`/`commit` do not.
+In practice: a real `svn info`/`ls`/`cat`/`log`/`checkout`/`update`/`diff`
+against a `svn.Server` implementation works (confirmed against a real `svn`
+client — see [Development](#development)), as long as the working copy
+isn't "mixed revision"; `svn switch`/`commit` do not.
 
 ## Installation
 

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"strings"
 )
 
 // IsSingleRevisionUpdate reports whether report describes a client whose
@@ -30,22 +31,60 @@ func IsSingleRevisionUpdate(report []ReportedPath) (rev uint, ok bool) {
 // AddDir/AddFile, a removed one via DeleteEntry, and a modified file via
 // OpenFile plus a fresh ApplyTextdelta -- an unmodified file is skipped
 // entirely, never even opened (confirmed against a real svnserve). Both
-// s.List and s.GetFile must be set. The result is ready to return from a
-// [Server.FinishReport] implementation, alongside CheckoutEdit for the
-// plain-checkout case:
+// s.List and s.GetFile must be set.
+//
+// target, if non-empty, restricts this to just the one node reached by
+// following target's own path segments down from path, instead of every
+// child of path -- this is needed whenever the actual target is (or is
+// inside) a plain file: path itself must always be a directory (List's
+// own contract requires it), but a real client asking to update or diff
+// a single file (e.g. "svn update file.txt", or "svn diff file.txt")
+// can't anchor a session at the file directly (the Editor Command Set
+// has no way to represent that: open-root always opens a directory).
+// Every path segment strictly between path and the target is walked (to
+// find the target and know whether it changed) but never itself
+// described in the editor sequence -- no open-dir/add-dir, no
+// entry-props -- and the target itself is described directly as a child
+// of the root, using just its own base name, as if its parent directory
+// coincided with the edit's root regardless of how many real path
+// segments actually separate them. This matches what a real client
+// itself expects (confirmed the hard way): it computes the target's own
+// local path by joining every open-dir/open-file name it receives, so
+// describing an intermediate directory produces a bogus, doubled path
+// (e.g. ".../trunk/trunk/main.go" instead of ".../trunk/main.go") that
+// a real client rejects outright once it tries to apply the edit.
+//
+// What target itself actually contains differs between the two commands
+// that set it, confirmed against a real client for each: "update" (see
+// Server.Update) always anchors a fresh session exactly at the target's
+// own parent directory, so its own target parameter reliably names only
+// the target's bare child name (a single path segment, relative to that
+// already-anchored session). "diff" (see Server.Diff) instead often
+// reuses an existing, possibly much higher-anchored session while still
+// reporting target as only that same bare child name -- so a
+// Server.FinishReport implementation handling "diff" needs to compute
+// the real, possibly multi-segment target itself, typically by comparing
+// Server.Diff's own versusURL argument against s.ReposInfo.URL (see
+// [RepoRelativePath]) and then stripping its own session anchor's prefix
+// from the result, the same way it already resolves every other path
+// argument.
+//
+// The result is ready to return from a [Server.FinishReport]
+// implementation, alongside CheckoutEdit for the plain-checkout case:
 //
 //	server.FinishReport = func(report []svn.ReportedPath) ([]svn.Item, error) {
 //		if svn.IsPlainCheckout(report) {
 //			return server.CheckoutEdit(report[0].Path, targetRev)
 //		}
 //		if fromRev, ok := svn.IsSingleRevisionUpdate(report); ok {
-//			return server.UpdateEdit(report[0].Path, fromRev, targetRev)
+//			return server.UpdateEdit(report[0].Path, target, fromRev, targetRev)
 //		}
 //		return nil, errors.New("only a plain checkout or single-revision update is supported")
 //	}
 //
-// (targetRev is whatever revision the preceding "update" command asked
-// for, which Server.Update's callback is responsible for remembering.)
+// (targetRev and target are whatever the preceding "update"/"diff"
+// command asked for, which Server.Update's/Server.Diff's callback is
+// responsible for remembering.)
 //
 // A directory present at both revisions is always visited (with a fresh
 // OpenDir and its svn:entry:* properties resent), whether or not anything
@@ -56,7 +95,7 @@ func IsSingleRevisionUpdate(report []ReportedPath) (rev uint, ok bool) {
 // large, mostly-unchanged tree (a real client tolerates the resulting
 // empty open-dir/close-dir pairs just fine, but it's still needless
 // traffic), left as a known limitation rather than solved preemptively.
-func (s *Server) UpdateEdit(path string, fromRev, toRev uint) ([]Item, error) {
+func (s *Server) UpdateEdit(path, target string, fromRev, toRev uint) ([]Item, error) {
 	if s.List == nil || s.GetFile == nil {
 		return nil, errors.New("svn: UpdateEdit: Server.List and Server.GetFile must both be set")
 	}
@@ -71,32 +110,55 @@ func (s *Server) UpdateEdit(path string, fromRev, toRev uint) ([]Item, error) {
 	}
 	_, fromChildren := splitCheckoutEntries(fromEntries)
 
+	var selfPath string
+	if self != nil {
+		selfPath = self.Path
+	}
+
 	e := NewEditorWriter()
 	if err := e.TargetRev(toRev); err != nil {
 		return nil, err
 	}
 	var rootRev *uint
-	var selfPath string
 	if self != nil {
 		r := self.CreatedRev
 		rootRev = &r
-		selfPath = self.Path
 	}
 	if err := e.OpenRoot(rootRev); err != nil {
 		return nil, err
 	}
-	if self != nil {
-		if err := s.checkoutEmitEntryProps(e.ChangeDirProp, *self); err != nil {
+
+	if target == "" {
+		if self != nil {
+			if err := s.checkoutEmitEntryProps(e.ChangeDirProp, *self); err != nil {
+				return nil, err
+			}
+		}
+		if err := s.updateChildren(e, path, "", selfPath, fromChildren, toChildren, fromRev, toRev); err != nil {
 			return nil, err
 		}
-	}
-	if err := s.updateChildren(e, path, "", selfPath, fromChildren, toChildren, fromRev, toRev); err != nil {
-		return nil, err
+	} else {
+		segments := strings.Split(target, "/")
+		if err := s.updateNavigateToTarget(e, path, selfPath, fromChildren, toChildren, segments, fromRev, toRev); err != nil {
+			return nil, err
+		}
 	}
 	if err := e.CloseDir(); err != nil {
 		return nil, err
 	}
 	return e.Items()
+}
+
+// findChild returns the one entry of children whose name (relative to
+// selfPath, the directory they are children of) is name, and whether one
+// was found at all.
+func findChild(children []Dirent, selfPath, name string) (Dirent, bool) {
+	for _, c := range children {
+		if childName(c, selfPath) == name {
+			return c, true
+		}
+	}
+	return Dirent{}, false
 }
 
 // listOrEmpty is like s.List, but treats a "path does not exist at rev"
@@ -209,6 +271,97 @@ func (s *Server) updateChildren(e *EditorWriter, dirPath, wirePath, selfPath str
 		}
 	}
 	return nil
+}
+
+// updateNavigateToTarget finds the node reached by following segments
+// down from dirPath (already listed as fromChildren/toChildren, direct
+// children of dirPath whose own Path is selfPath), and describes only
+// that final node, directly as a child of e's currently open directory
+// (the root) -- using just its own base name as the wire path, not the
+// full path from dirPath. Every directory strictly between dirPath and
+// the target is walked, to find the target and know whether it changed,
+// but is never itself described (no open-dir/add-dir, no entry-props);
+// see UpdateEdit's own doc comment for why.
+func (s *Server) updateNavigateToTarget(e *EditorWriter, dirPath, selfPath string, fromChildren, toChildren []Dirent, segments []string, fromRev, toRev uint) error {
+	name := segments[0]
+	to, toFound := findChild(toChildren, selfPath, name)
+	from, fromFound := findChild(fromChildren, selfPath, name)
+
+	if !toFound {
+		if fromFound {
+			return e.DeleteEntry(name, &toRev)
+		}
+		return nil // never existed at either revision: nothing to say
+	}
+
+	childDirPath := joinNonEmpty(dirPath, name)
+	isNew := !fromFound || from.Kind != to.Kind
+
+	if len(segments) > 1 {
+		if to.Kind != "dir" {
+			return fmt.Errorf("svn: UpdateEdit: %s: not a directory", childDirPath)
+		}
+		toGrandEntries, err := s.List(childDirPath, &toRev, "immediates", checkoutListFields, nil)
+		if err != nil {
+			return err
+		}
+		_, toGrandchildren := splitCheckoutEntries(toGrandEntries)
+		var fromGrandchildren []Dirent
+		if !isNew {
+			fromGrandEntries, err := s.listOrEmpty(childDirPath, fromRev)
+			if err != nil {
+				return err
+			}
+			_, fromGrandchildren = splitCheckoutEntries(fromGrandEntries)
+		}
+		return s.updateNavigateToTarget(e, childDirPath, to.Path, fromGrandchildren, toGrandchildren, segments[1:], fromRev, toRev)
+	}
+
+	// The target itself: describe it as a direct child of the root,
+	// using just its own name -- if it's a directory, everything inside
+	// it is then described normally (updateChildren), with wirePath
+	// starting fresh at that same bare name.
+	switch to.Kind {
+	case "dir":
+		if isNew {
+			if err := e.AddDir(name, nil); err != nil {
+				return err
+			}
+		} else if err := e.OpenDir(name, fromRev); err != nil {
+			return err
+		}
+		if err := s.checkoutEmitEntryProps(e.ChangeDirProp, to); err != nil {
+			return err
+		}
+		toGrandEntries, err := s.List(childDirPath, &toRev, "immediates", checkoutListFields, nil)
+		if err != nil {
+			return err
+		}
+		_, toGrandchildren := splitCheckoutEntries(toGrandEntries)
+		var fromGrandchildren []Dirent
+		if !isNew {
+			fromGrandEntries, err := s.listOrEmpty(childDirPath, fromRev)
+			if err != nil {
+				return err
+			}
+			_, fromGrandchildren = splitCheckoutEntries(fromGrandEntries)
+		}
+		if err := s.updateChildren(e, childDirPath, name, to.Path, fromGrandchildren, toGrandchildren, fromRev, toRev); err != nil {
+			return err
+		}
+		return e.CloseDir()
+	case "file":
+		switch {
+		case isNew:
+			return s.checkoutAddFile(e, childDirPath, name, to, toRev)
+		case to.CreatedRev == from.CreatedRev:
+			return nil // unchanged: skip it entirely, like updateChildren does
+		default:
+			return s.updateOpenFile(e, childDirPath, name, to, fromRev, toRev)
+		}
+	default:
+		return fmt.Errorf("svn: UpdateEdit: %s: unsupported node kind %q", childDirPath, to.Kind)
+	}
 }
 
 // joinNonEmpty joins a and b with "/", except that either being "" just

@@ -405,3 +405,170 @@ func TestServerGetIProps(t *testing.T) {
 	clientSide.Close()
 	<-serveErr
 }
+
+// TestServerDiffAcksImmediately checks that "diff" gets its own "empty
+// auth-request" ack right away, the same way "update" does -- confirmed
+// by raw wire capture, reading immediately after sending "diff" and
+// before sending "set-path" at all. A first version of this fix assumed
+// the ack was instead deferred until "finish-report" (from an earlier,
+// less careful capture that sent "set-path" and "finish-report" before
+// reading anything, which couldn't actually distinguish "sent
+// immediately but read late" from "sent late"); a real "svn diff" client
+// left waiting forever for the immediate ack that assumption never sent
+// is what caught the mistake.
+func TestServerDiffAcksImmediately(t *testing.T) {
+	clientSide, serverSide := net.Pipe()
+	defer clientSide.Close()
+
+	var gotDiff bool
+	var server Server
+	server.Diff = func(rev *uint, target string, recurse, ignoreAncestry bool, versusURL string, textDeltas bool, depth string) {
+		gotDiff = true
+	}
+	server.FinishReport = func(report []ReportedPath) ([]Item, error) {
+		return nil, nil
+	}
+
+	serveErr := make(chan error, 1)
+	go func() {
+		serveErr <- server.Serve(serverSide, serverSide)
+	}()
+
+	cc := conn{r: clientSide, w: clientSide}
+
+	var item Item
+	if err := cc.Read(&item); err != nil {
+		t.Fatalf("reading greeting: %v", err)
+	}
+	if err := cc.Write([]any{2, []any{}, []byte("svn://example.com/repo"), []byte("test-client"), []any{}}); err != nil {
+		t.Fatalf("sending greeting response: %v", err)
+	}
+	if err := cc.Read(&item); err != nil {
+		t.Fatalf("reading auth-request: %v", err)
+	}
+	if err := cc.Write([]any{"ANONYMOUS", []any{[]byte{}}}); err != nil {
+		t.Fatalf("sending auth-response: %v", err)
+	}
+	if err := cc.Read(&item); err != nil {
+		t.Fatalf("reading auth ack: %v", err)
+	}
+	if err := cc.Read(&item); err != nil {
+		t.Fatalf("reading repos-info: %v", err)
+	}
+
+	two := uint(2)
+	if err := cc.Write([]any{"diff", []any{
+		[]any{two}, []byte(""), true, false, []byte("svn://example.com/repo"), true, "infinity",
+	}}); err != nil {
+		t.Fatalf("sending diff: %v", err)
+	}
+	// Read before sending set-path at all, so this can only pass if the
+	// ack genuinely arrives right away.
+	if err := cc.Read(&item); err != nil {
+		t.Fatalf("reading diff's immediate ack: %v", err)
+	}
+	if !gotDiff {
+		t.Errorf("Diff was not called")
+	}
+
+	if err := cc.Write([]any{"set-path", []any{[]byte(""), uint(1), false}}); err != nil {
+		t.Fatalf("sending set-path: %v", err)
+	}
+	if err := cc.Write([]any{"finish-report", []any{}}); err != nil {
+		t.Fatalf("sending finish-report: %v", err)
+	}
+
+	if err := cc.Read(&item); err != nil {
+		t.Fatalf("reading finish-report's own ack: %v", err)
+	}
+	if err := cc.Read(&item); err != nil {
+		t.Fatalf("reading close-edit: %v", err)
+	}
+	if item.Type != ListType || len(item.List) != 2 || item.List[0].Text != "close-edit" {
+		t.Fatalf("got %s, want a close-edit command", item)
+	}
+	if err := cc.Write([]any{"success", []any{}}); err != nil {
+		t.Fatalf("acking close-edit: %v", err)
+	}
+	if err := cc.Read(&item); err != nil {
+		t.Fatalf("reading finish-report's final response: %v", err)
+	}
+
+	clientSide.Close()
+	<-serveErr
+}
+
+// TestServerGetDir checks "get-dir" (the older, pre-"list" way to read a
+// directory's children, which "svn diff" still falls back to for
+// enumerating a deleted directory's former contents) against golden
+// text captured from a real svnserve: the response is
+// "( rev:number props:proplist ( dirent ... ) )", and each dirent is
+// "( name:string kind:word size:number has-props:bool created-rev:number
+// [ created-date:string ] [ last-author:string ] )" -- confirmed to have
+// every field present as a bare value except the trailing two, unlike
+// "list"'s own, fully-optional field set.
+func TestServerGetDir(t *testing.T) {
+	clientSide, serverSide := net.Pipe()
+	defer clientSide.Close()
+
+	var server Server
+	server.List = func(path string, rev *uint, depth string, fields, pattern []string) ([]Dirent, error) {
+		if path != "trunk" {
+			t.Errorf("List called with path %q, want %q", path, "trunk")
+		}
+		return []Dirent{
+			{Path: "/trunk", Kind: "dir", CreatedRev: 3},
+			{
+				Path: "/trunk/main.go", Kind: "file", Size: 13, HasProps: false,
+				CreatedRev: 2, CreatedDate: "2024-01-01T00:00:00.000000Z", LastAuthor: "tester",
+			},
+		}, nil
+	}
+
+	serveErr := make(chan error, 1)
+	go func() {
+		serveErr <- server.Serve(serverSide, serverSide)
+	}()
+
+	cc := conn{r: clientSide, w: clientSide}
+
+	var item Item
+	if err := cc.Read(&item); err != nil {
+		t.Fatalf("reading greeting: %v", err)
+	}
+	if err := cc.Write([]any{2, []any{}, []byte("svn://example.com/repo"), []byte("test-client"), []any{}}); err != nil {
+		t.Fatalf("sending greeting response: %v", err)
+	}
+	if err := cc.Read(&item); err != nil {
+		t.Fatalf("reading auth-request: %v", err)
+	}
+	if err := cc.Write([]any{"ANONYMOUS", []any{[]byte{}}}); err != nil {
+		t.Fatalf("sending auth-response: %v", err)
+	}
+	if err := cc.Read(&item); err != nil {
+		t.Fatalf("reading auth ack: %v", err)
+	}
+	if err := cc.Read(&item); err != nil {
+		t.Fatalf("reading repos-info: %v", err)
+	}
+
+	if err := cc.Write([]any{"get-dir", []any{
+		[]byte("trunk"), []any{uint(2)}, true, true, []any{"kind"}, false,
+	}}); err != nil {
+		t.Fatalf("sending get-dir: %v", err)
+	}
+	if err := cc.Read(&item); err != nil {
+		t.Fatalf("reading get-dir pre-ack: %v", err)
+	}
+	if err := cc.Read(&item); err != nil {
+		t.Fatalf("reading get-dir response: %v", err)
+	}
+
+	want := `( success ( 3 ( ) ( ( 7:main.go file 13 false 2 ( 27:2024-01-01T00:00:00.000000Z ) ( 6:tester ) ) ) ) )`
+	if item.String() != want {
+		t.Errorf("get-dir response =\n%s\nwant:\n%s", item, want)
+	}
+
+	clientSide.Close()
+	<-serveErr
+}

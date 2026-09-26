@@ -355,20 +355,12 @@ func defaultExportDest(repo string) (string, error) {
 // repo pointed at ".../reponame/trunk". It is "" if repo points at the
 // repository root itself.
 func repoRootRelativePath(c *svn.Client, repo string) (string, error) {
-	root, err := url.Parse(c.Info.URL)
+	rel, err := svn.RepoRelativePath(c.Info.URL, repo)
 	if err != nil {
-		return "", fmt.Errorf("export: parsing repository root URL %q: %w", c.Info.URL, err)
-	}
-	given, err := url.Parse(strings.TrimSuffix(repo, "/"))
-	if err != nil {
-		return "", fmt.Errorf("export: parsing URL: %w", err)
-	}
-	rootPath := strings.TrimSuffix(root.Path, "/")
-	if !strings.HasPrefix(given.Path, rootPath) {
 		// Should not happen: Connect resolved repo to this very root.
-		return "", fmt.Errorf("export: %q is not under repository root %q", repo, c.Info.URL)
+		return "", fmt.Errorf("export: %w", err)
 	}
-	return strings.Trim(given.Path[len(rootPath):], "/"), nil
+	return rel, nil
 }
 
 // joinNonEmpty joins a and b with "/", except that either being "" just
