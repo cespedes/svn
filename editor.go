@@ -182,14 +182,19 @@ func (e *EditorWriter) AddDir(path string, copyFrom *EditorCopyFrom) error {
 
 // OpenDir is like AddDir, but for a directory the client already has:
 // rev is the revision of the directory being opened, as the client
-// already has it.
+// already has it. rev is sent wrapped as a "[ rev:number ]" optional
+// value -- confirmed against a real svnserve to be how a real client
+// expects it, contrary to a first, textually-literal reading of the
+// protocol's own grammar for this command, which shows it as a bare,
+// non-bracketed rev:number (a real client rejects the bare form with
+// "E210004: Malformed network data"; see CLAUDE.md).
 func (e *EditorWriter) OpenDir(path string, rev uint) error {
 	parent, err := e.topDir()
 	if err != nil {
 		return err
 	}
 	token := e.pushToken(editorDir)
-	return e.emit("open-dir", []any{[]byte(path), []byte(parent), []byte(token), rev})
+	return e.emit("open-dir", []any{[]byte(path), []byte(parent), []byte(token), []any{rev}})
 }
 
 // ChangeDirProp sets property name on the currently open directory to
@@ -242,13 +247,15 @@ func (e *EditorWriter) AddFile(path string, copyFrom *EditorCopyFrom) error {
 
 // OpenFile is like AddFile, but for a file the client already has: rev is
 // the revision of the file being opened, as the client already has it.
+// Wrapped as a "[ rev:number ]" optional value on the wire -- see
+// OpenDir's doc comment for why.
 func (e *EditorWriter) OpenFile(path string, rev uint) error {
 	parent, err := e.topDir()
 	if err != nil {
 		return err
 	}
 	token := e.pushToken(editorFile)
-	return e.emit("open-file", []any{[]byte(path), []byte(parent), []byte(token), rev})
+	return e.emit("open-file", []any{[]byte(path), []byte(parent), []byte(token), []any{rev}})
 }
 
 // ApplyTextdelta sets the currently open file's content to content, sent
@@ -307,15 +314,28 @@ func (e *EditorWriter) AbsentFile(path string) error {
 
 // DeleteEntry reports that path, a child of the currently open directory,
 // no longer exists (or is about to be replaced by whatever AddDir/AddFile
-// call follows). rev is the revision the client is expected to be at;
-// unlike the optional revision elsewhere in this package, the wire
-// protocol always requires one here.
-func (e *EditorWriter) DeleteEntry(path string, rev uint) error {
+// call follows). rev, if non-nil, is the revision at which path was
+// determined to be gone (a real svnserve sends the update's own target
+// revision here) -- confirmed against a real svnserve to be optional,
+// contrary to a first, textually-literal reading of the protocol's own
+// grammar for this command, which shows it as a bare, non-bracketed
+// rev:number (see CLAUDE.md).
+func (e *EditorWriter) DeleteEntry(path string, rev *uint) error {
 	parent, err := e.topDir()
 	if err != nil {
 		return err
 	}
-	return e.emit("delete-entry", []any{[]byte(path), rev, []byte(parent)})
+	return e.emit("delete-entry", []any{[]byte(path), optionalUint(rev), []byte(parent)})
+}
+
+// optionalUint returns the wire representation of a "[ x:number ]"
+// optional value: an empty list if rev is nil, or a list holding *rev
+// directly otherwise.
+func optionalUint(rev *uint) []any {
+	if rev == nil {
+		return []any{}
+	}
+	return []any{*rev}
 }
 
 // Items returns the accumulated Editor Command Set sequence, ready to

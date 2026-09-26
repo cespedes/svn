@@ -141,6 +141,100 @@ func TestEditorWriterTreeShape(t *testing.T) {
 	}
 }
 
+// TestEditorWriterOpenAndDeleteWireShape checks OpenDir/OpenFile/
+// DeleteEntry against golden text captured from a real svnserve's own
+// "update" editor sequence (see CLAUDE.md). Both bugs this test would
+// have caught went undetected until a real "svn update" against a real
+// svnserve, and then a real "svn" client, actually rejected the
+// generated sequence with "E210004: Malformed network data":
+//   - OpenDir/OpenFile's own rev is wrapped as a "[ rev:number ]"
+//     optional value, not sent bare, despite the protocol's own grammar
+//     for these two commands showing an unbracketed rev:number.
+//   - DeleteEntry's rev is itself optional ("[ rev:number ]"), despite
+//     the protocol's own grammar showing a bare rev:number there too.
+func TestEditorWriterOpenAndDeleteWireShape(t *testing.T) {
+	e := NewEditorWriter()
+	rootRev := uint(1)
+	if err := e.OpenRoot(&rootRev); err != nil {
+		t.Fatalf("OpenRoot: %v", err)
+	}
+	toRev := uint(2)
+	if err := e.DeleteEntry("trunk/sub", &toRev); err != nil {
+		t.Fatalf("DeleteEntry: %v", err)
+	}
+	if err := e.OpenDir("trunk", 1); err != nil {
+		t.Fatalf("OpenDir: %v", err)
+	}
+	if err := e.OpenFile("trunk/main.go", 1); err != nil {
+		t.Fatalf("OpenFile: %v", err)
+	}
+	content := []byte("package main\n\nfunc main() {}\n")
+	if err := e.ApplyTextdelta(content, nil); err != nil {
+		t.Fatalf("ApplyTextdelta: %v", err)
+	}
+	if err := e.CloseFile(checksum(content)); err != nil {
+		t.Fatalf("CloseFile: %v", err)
+	}
+	if err := e.CloseDir(); err != nil {
+		t.Fatalf("CloseDir: %v", err)
+	}
+	if err := e.CloseDir(); err != nil {
+		t.Fatalf("CloseDir (root): %v", err)
+	}
+	items, err := e.Items()
+	if err != nil {
+		t.Fatalf("Items: %v", err)
+	}
+
+	want := []string{
+		`( open-root ( ( 1 ) 1:0 ) )`,
+		`( delete-entry ( 9:trunk/sub ( 2 ) 1:0 ) )`,
+		`( open-dir ( 5:trunk 1:0 1:1 ( 1 ) ) )`,
+		`( open-file ( 13:trunk/main.go 1:1 1:2 ( 1 ) ) )`,
+		`( apply-textdelta ( 1:2 ( ) ) )`,
+		"", // textdelta-chunk: binary payload, not pinned
+		`( textdelta-end ( 1:2 ) )`,
+		fmt.Sprintf(`( close-file ( 1:2 ( 32:%x ) ) )`, md5.Sum(content)),
+		`( close-dir ( 1:1 ) )`,
+		`( close-dir ( 1:0 ) )`,
+	}
+	if len(items) != len(want) {
+		t.Fatalf("got %d items, want %d\ngot:\n%s", len(items), len(want), itemLines(items))
+	}
+	for i := range want {
+		if want[i] == "" {
+			continue
+		}
+		if items[i].String() != want[i] {
+			t.Errorf("item %d = %s, want %s", i, items[i], want[i])
+		}
+	}
+}
+
+// TestEditorWriterDeleteEntryNilRev checks that a nil rev omits the
+// optional group entirely, rather than sending some placeholder value.
+func TestEditorWriterDeleteEntryNilRev(t *testing.T) {
+	e := NewEditorWriter()
+	rootRev := uint(1)
+	if err := e.OpenRoot(&rootRev); err != nil {
+		t.Fatalf("OpenRoot: %v", err)
+	}
+	if err := e.DeleteEntry("trunk/sub", nil); err != nil {
+		t.Fatalf("DeleteEntry: %v", err)
+	}
+	if err := e.CloseDir(); err != nil {
+		t.Fatalf("CloseDir: %v", err)
+	}
+	items, err := e.Items()
+	if err != nil {
+		t.Fatalf("Items: %v", err)
+	}
+	want := `( delete-entry ( 9:trunk/sub ( ) 1:0 ) )`
+	if items[1].String() != want {
+		t.Errorf("item 1 = %s, want %s", items[1], want)
+	}
+}
+
 // TestEditorWriterNestingErrors checks that EditorWriter rejects the
 // caller mistakes its stack-based nesting is meant to catch: acting on a
 // node before it's open, closing a directory while a child file is still

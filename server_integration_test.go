@@ -38,26 +38,49 @@ func runSVN(t *testing.T, args ...string) (string, error) {
 
 // fakeNode is one entry in the tiny, fixed, in-memory repository served by
 // startFakeServer, keyed by its full path from the repository root (no
-// leading slash; "" is the root itself).
+// leading slash; "" is the root itself). rev is the node's own
+// CreatedRev, as of whichever fakeTreeAt snapshot it came from.
 type fakeNode struct {
 	kind    string // "file" or "dir"
 	content string
+	rev     int
 }
 
-// fakeTree is a small fixed repository:
+// fakeLatestRev is the highest revision fakeTreeAt knows about, and what
+// newFakeServer's GetLatestRev reports.
+const fakeLatestRev = 2
+
+// fakeTreeAt returns the repository's state as of rev (1 or 2; anything
+// below 2 is treated as rev 1). At rev 1:
 //
 //	README.md
 //	trunk/main.go
 //	trunk/sub/nested.txt
-func fakeTree() map[string]fakeNode {
-	return map[string]fakeNode{
-		"":                     {kind: "dir"},
-		"README.md":            {kind: "file", content: "hello world\n"},
-		"trunk":                {kind: "dir"},
-		"trunk/main.go":        {kind: "file", content: "package main\n"},
-		"trunk/sub":            {kind: "dir"},
-		"trunk/sub/nested.txt": {kind: "file", content: "nested\n"},
+//
+// At rev 2 (fakeLatestRev): README.md is unchanged (same CreatedRev, so
+// TestUpdate's real "svn update" subtest can confirm an unmodified file
+// is never even opened); trunk/main.go's content changed; trunk/sub (and
+// its only file) was removed; trunk/newdir/inside.txt and
+// trunk/newfile.go were added -- exercising every UpdateEdit case
+// (unchanged, modified, deleted, added) in one tree.
+func fakeTreeAt(rev int) map[string]fakeNode {
+	tree := map[string]fakeNode{
+		"":              {kind: "dir", rev: 1},
+		"README.md":     {kind: "file", rev: 1, content: "hello world\n"},
+		"trunk":         {kind: "dir", rev: 1},
+		"trunk/main.go": {kind: "file", rev: 1, content: "package main\n"},
 	}
+	if rev < 2 {
+		tree["trunk/sub"] = fakeNode{kind: "dir", rev: 1}
+		tree["trunk/sub/nested.txt"] = fakeNode{kind: "file", rev: 1, content: "nested\n"}
+		return tree
+	}
+	tree["trunk"] = fakeNode{kind: "dir", rev: 2}
+	tree["trunk/main.go"] = fakeNode{kind: "file", rev: 2, content: "package main\n\nfunc main() {}\n"}
+	tree["trunk/newdir"] = fakeNode{kind: "dir", rev: 2}
+	tree["trunk/newdir/inside.txt"] = fakeNode{kind: "file", rev: 2, content: "inside\n"}
+	tree["trunk/newfile.go"] = fakeNode{kind: "file", rev: 2, content: "package main\n\nfunc New() {}\n"}
+	return tree
 }
 
 // newFakeServer builds a fresh svn.Server backed by fakeTree, for exactly
@@ -72,8 +95,15 @@ func fakeTree() map[string]fakeNode {
 // connection, rather than reusing one Server for all of them, is what
 // keeps this resolution correct when multiple connections are served
 // concurrently.
-func newFakeServer() svn.Server {
-	tree := fakeTree()
+// newFakeServer returns a *svn.Server rather than a svn.Server: its own
+// FinishReport closure calls back into server.CheckoutEdit/UpdateEdit,
+// which read server.ReposInfo -- and that field is filled in later, by
+// Serve's own handling of Greet, on whatever *Server Serve was actually
+// called against. Returning a value here (and letting the caller call
+// Serve on its own copy) would leave FinishReport reading a ReposInfo
+// that Serve's mutation never reached, silently keeping it at its zero
+// value.
+func newFakeServer() *svn.Server {
 	var sessionBase string
 
 	resolve := func(path string) string {
@@ -86,8 +116,16 @@ func newFakeServer() svn.Server {
 			return sessionBase + "/" + path
 		}
 	}
+	// effectiveRev turns a callback's own rev argument (nil meaning
+	// "latest") into a concrete revision number to key fakeTreeAt with.
+	effectiveRev := func(rev *uint) int {
+		if rev == nil {
+			return fakeLatestRev
+		}
+		return int(*rev)
+	}
 
-	var server svn.Server
+	server := &svn.Server{}
 	server.Greet = func(version int, capabilities []string, connectURL string, raclient string, client *string) (svn.ReposInfo, error) {
 		u, err := url.Parse(connectURL)
 		if err != nil {
@@ -102,22 +140,24 @@ func newFakeServer() svn.Server {
 			Capabilities: []string{},
 		}, nil
 	}
-	server.GetLatestRev = func() (int, error) { return 1, nil }
+	server.GetLatestRev = func() (int, error) { return fakeLatestRev, nil }
 	var updateRev *uint
 	server.Update = func(rev *uint, target string, recurse bool) {
 		updateRev = rev
 	}
 	server.Stat = func(path string, rev *uint) (svn.Dirent, error) {
+		tree := fakeTreeAt(effectiveRev(rev))
 		n, ok := tree[resolve(path)]
 		if !ok {
 			return svn.Dirent{}, fs.ErrNotExist
 		}
 		return svn.Dirent{
 			Kind: n.kind, Size: uint64(len(n.content)),
-			CreatedRev: 1, CreatedDate: "2024-01-01T00:00:00.000000Z", LastAuthor: "tester",
+			CreatedRev: uint(n.rev), CreatedDate: "2024-01-01T00:00:00.000000Z", LastAuthor: "tester",
 		}, nil
 	}
 	server.CheckPath = func(path string, rev *uint) (string, error) {
+		tree := fakeTreeAt(effectiveRev(rev))
 		n, ok := tree[resolve(path)]
 		if !ok {
 			return "none", nil
@@ -131,6 +171,7 @@ func newFakeServer() svn.Server {
 		return "/" + p
 	}
 	server.List = func(path string, rev *uint, depth string, fields, pattern []string) ([]svn.Dirent, error) {
+		tree := fakeTreeAt(effectiveRev(rev))
 		full := resolve(path)
 		n, ok := tree[full]
 		if !ok || n.kind != "dir" {
@@ -144,7 +185,7 @@ func newFakeServer() svn.Server {
 		// entries, matching a real svnserve.
 		out := []svn.Dirent{{
 			Path: wirePath(full), Kind: "dir",
-			CreatedRev: 1, CreatedDate: "2024-01-01T00:00:00.000000Z", LastAuthor: "tester",
+			CreatedRev: uint(n.rev), CreatedDate: "2024-01-01T00:00:00.000000Z", LastAuthor: "tester",
 		}}
 		for p, e := range tree {
 			if p == full || !strings.HasPrefix(p, prefix) {
@@ -156,20 +197,21 @@ func newFakeServer() svn.Server {
 			}
 			out = append(out, svn.Dirent{
 				Path: wirePath(p), Kind: e.kind, Size: uint64(len(e.content)),
-				CreatedRev: 1, CreatedDate: "2024-01-01T00:00:00.000000Z", LastAuthor: "tester",
+				CreatedRev: uint(e.rev), CreatedDate: "2024-01-01T00:00:00.000000Z", LastAuthor: "tester",
 			})
 		}
 		return out, nil
 	}
 	server.GetFile = func(path string, rev *uint, wantProps, wantContents bool) (uint, []svn.PropList, []byte, error) {
+		tree := fakeTreeAt(effectiveRev(rev))
 		n, ok := tree[resolve(path)]
 		if !ok || n.kind != "file" {
 			return 0, nil, nil, fs.ErrNotExist
 		}
 		if !wantContents {
-			return 1, nil, nil, nil
+			return uint(n.rev), nil, nil, nil
 		}
-		return 1, nil, []byte(n.content), nil
+		return uint(n.rev), nil, []byte(n.content), nil
 	}
 	server.Log = func(paths []string, startRev, endRev uint, changedPaths bool) ([]svn.LogEntry, error) {
 		entry := svn.LogEntry{
@@ -196,15 +238,18 @@ func newFakeServer() svn.Server {
 		return []svn.LogEntry{entry}, nil
 	}
 	server.FinishReport = func(report []svn.ReportedPath) ([]svn.Item, error) {
-		if !svn.IsPlainCheckout(report) {
-			return nil, fmt.Errorf("fake server: only a plain checkout is supported, got %+v", report)
+		toRev := updateRev
+		if toRev == nil {
+			latest := uint(fakeLatestRev)
+			toRev = &latest
 		}
-		rev := updateRev
-		if rev == nil {
-			latest := uint(1)
-			rev = &latest
+		if svn.IsPlainCheckout(report) {
+			return server.CheckoutEdit(report[0].Path, *toRev)
 		}
-		return server.CheckoutEdit(report[0].Path, *rev)
+		if fromRev, ok := svn.IsSingleRevisionUpdate(report); ok {
+			return server.UpdateEdit(report[0].Path, fromRev, *toRev)
+		}
+		return nil, fmt.Errorf("fake server: unsupported report shape: %+v", report)
 	}
 	return server
 }
@@ -258,7 +303,7 @@ func TestServerAgainstRealSVNClient(t *testing.T) {
 		if !strings.Contains(out, "Node Kind: directory") {
 			t.Errorf("info output missing directory kind:\n%s", out)
 		}
-		if !strings.Contains(out, "Revision: 1") {
+		if !strings.Contains(out, fmt.Sprintf("Revision: %d", fakeLatestRev)) {
 			t.Errorf("info output missing revision:\n%s", out)
 		}
 		if !strings.Contains(out, "Last Changed Author: tester") {
@@ -302,10 +347,13 @@ func TestServerAgainstRealSVNClient(t *testing.T) {
 	// newFakeServer) answers via CheckoutEdit, which walks the whole tree
 	// and describes every node as newly added. This is the first
 	// end-to-end exercise of EditorWriter/CheckoutEdit against a real
-	// client, not just a hand-checked Item sequence.
+	// client, not just a hand-checked Item sequence. Pinned to r1 (rather
+	// than the fakeLatestRev state TestUpdate exercises) so this keeps
+	// checking the plain, single-revision tree its own assertions below
+	// describe.
 	t.Run("checkout", func(t *testing.T) {
 		dir := t.TempDir()
-		run("checkout", "-q", repoURL, dir)
+		run("checkout", "-r", "1", "-q", repoURL, dir)
 		readme, err := os.ReadFile(filepath.Join(dir, "README.md"))
 		if err != nil {
 			t.Fatalf("reading checked-out README.md: %v", err)
@@ -338,6 +386,64 @@ func TestServerAgainstRealSVNClient(t *testing.T) {
 		}
 		if !strings.Contains(info, "Last Changed Author: tester") {
 			t.Errorf("info output missing author:\n%s", info)
+		}
+	})
+
+	// A real "svn update" against a working copy already checked out at
+	// r1: the client reports having r1 (not start-empty), so
+	// Server.FinishReport answers via UpdateEdit instead of CheckoutEdit,
+	// diffing r1 against fakeLatestRev. fakeTreeAt's r1-to-r2 change
+	// exercises every case at once: README.md is untouched (must not
+	// even be opened -- confirmed separately in checkout_test.go/
+	// update_test.go, but a real client accepting the update at all is
+	// itself partial evidence), trunk/main.go's content changed,
+	// trunk/sub was removed, and trunk/newdir/inside.txt plus
+	// trunk/newfile.go were added.
+	t.Run("update", func(t *testing.T) {
+		dir := t.TempDir()
+		run("checkout", "-r", "1", "-q", repoURL, dir)
+		run("update", "-q", dir)
+
+		readme, err := os.ReadFile(filepath.Join(dir, "README.md"))
+		if err != nil {
+			t.Fatalf("reading README.md: %v", err)
+		}
+		if string(readme) != "hello world\n" {
+			t.Errorf("README.md content = %q, want %q (unchanged)", readme, "hello world\n")
+		}
+		mainGo, err := os.ReadFile(filepath.Join(dir, "trunk", "main.go"))
+		if err != nil {
+			t.Fatalf("reading trunk/main.go: %v", err)
+		}
+		if want := "package main\n\nfunc main() {}\n"; string(mainGo) != want {
+			t.Errorf("trunk/main.go content = %q, want %q", mainGo, want)
+		}
+		if _, err := os.Stat(filepath.Join(dir, "trunk", "sub")); err == nil {
+			t.Errorf("trunk/sub should have been removed by the update")
+		}
+		inside, err := os.ReadFile(filepath.Join(dir, "trunk", "newdir", "inside.txt"))
+		if err != nil {
+			t.Fatalf("reading trunk/newdir/inside.txt: %v", err)
+		}
+		if string(inside) != "inside\n" {
+			t.Errorf("trunk/newdir/inside.txt content = %q, want %q", inside, "inside\n")
+		}
+		newfile, err := os.ReadFile(filepath.Join(dir, "trunk", "newfile.go"))
+		if err != nil {
+			t.Fatalf("reading trunk/newfile.go: %v", err)
+		}
+		if want := "package main\n\nfunc New() {}\n"; string(newfile) != want {
+			t.Errorf("trunk/newfile.go content = %q, want %q", newfile, want)
+		}
+
+		info := run("info", dir)
+		if !strings.Contains(info, fmt.Sprintf("Revision: %d", fakeLatestRev)) {
+			t.Errorf("info output missing updated revision:\n%s", info)
+		}
+
+		status := run("status", dir)
+		if strings.TrimSpace(status) != "" {
+			t.Errorf("expected a clean status after update, got:\n%s", status)
 		}
 	})
 
