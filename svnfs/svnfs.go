@@ -227,7 +227,6 @@ func newFileInfo(name, kind string, size uint64, createdRev uint, createdDate st
 }
 
 func (fi *fileInfo) Name() string       { return fi.name }
-func (fi *fileInfo) Size() int64        { return int64(fi.size) }
 func (fi *fileInfo) IsDir() bool        { return fi.kind == "dir" }
 func (fi *fileInfo) ModTime() time.Time { return fi.modTime }
 func (fi *fileInfo) Sys() any           { return nil }
@@ -237,6 +236,16 @@ func (fi *fileInfo) Mode() fs.FileMode {
 		return fs.ModeDir | 0555
 	}
 	return 0444
+}
+
+// Size reports 0 for a directory, rather than the file size a real
+// svnserve happens to send for one: SVN's own "invalid size" sentinel
+// (all bits set, i.e. -1 once the underlying uint64 is read as int64).
+func (fi *fileInfo) Size() int64 {
+	if fi.IsDir() {
+		return 0
+	}
+	return int64(fi.size)
 }
 
 var _ fs.FileInfo = (*fileInfo)(nil)

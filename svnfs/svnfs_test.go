@@ -4,6 +4,7 @@ import (
 	"errors"
 	"io"
 	"io/fs"
+	"math"
 	"net"
 	"strings"
 	"testing"
@@ -12,6 +13,17 @@ import (
 	"github.com/cespedes/svn"
 	"github.com/cespedes/svn/svnfs"
 )
+
+// svnSize mimics a real svnserve, which reports a directory's "size" as
+// SVN_INVALID_FILESIZE -- all bits set, i.e. math.MaxUint64 -- rather than
+// leaving it at some small, meaningless number like the byte length of
+// this fake tree's own (empty, for directories) content field.
+func svnSize(n *memNode) uint64 {
+	if n.kind == "dir" {
+		return math.MaxUint64
+	}
+	return uint64(len(n.content))
+}
 
 // memNode is a tiny in-memory repository tree, used to back a real
 // svn.Server for these tests.
@@ -95,7 +107,7 @@ func newTestFS(t *testing.T) *svnfs.FS {
 			return svn.Dirent{}, fs.ErrNotExist
 		}
 		return svn.Dirent{
-			Kind: n.kind, Size: uint64(len(n.content)),
+			Kind: n.kind, Size: svnSize(n),
 			CreatedRev: n.rev, CreatedDate: n.date, LastAuthor: n.author,
 		}, nil
 	}
@@ -111,7 +123,7 @@ func newTestFS(t *testing.T) *svnfs.FS {
 				// this is the real-world svnserve shape svnfs must cope
 				// with (see the same workaround in cmd/go-svn's "ls").
 				Path: joinSVNPath(path, name),
-				Kind: c.kind, Size: uint64(len(c.content)),
+				Kind: c.kind, Size: svnSize(c),
 				CreatedRev: c.rev, CreatedDate: c.date, LastAuthor: c.author,
 			})
 		}
@@ -175,6 +187,12 @@ func TestStatDirectory(t *testing.T) {
 	}
 	if info.Name() != "trunk" {
 		t.Errorf("Stat(trunk).Name() = %q, want %q", info.Name(), "trunk")
+	}
+	// A real svnserve reports a directory's size as its own "invalid
+	// size" sentinel (all bits set); Size must not leak that through as
+	// a nonsensical negative number.
+	if info.Size() != 0 {
+		t.Errorf("Stat(trunk).Size() = %d, want 0", info.Size())
 	}
 }
 
