@@ -54,13 +54,6 @@ func (n *memNode) lookup(path string) *memNode {
 	return cur
 }
 
-func joinSVNPath(parent, name string) string {
-	if parent == "" {
-		return name
-	}
-	return parent + "/" + name
-}
-
 func buildTree() *memNode {
 	return &memNode{
 		kind: "dir", rev: 10, date: "2024-01-01T00:00:00.000000Z", author: "root",
@@ -116,18 +109,17 @@ func newTestFS(t *testing.T) *svnfs.FS {
 		if n == nil || n.kind != "dir" {
 			return nil, errors.New("not found")
 		}
-		// A real svnserve returns each Path prefixed with "/" + the full
-		// queried path (not a bare child name), and includes the queried
-		// directory itself as one of its own "children" -- confirmed
-		// against a real server; svnfs.readDir must cope with both.
-		out := []svn.Dirent{
-			{Path: "/" + path, Kind: n.kind, Size: svnSize(n),
-				CreatedRev: n.rev, CreatedDate: n.date, LastAuthor: n.author},
-		}
+		// Just the base name: Serve rebuilds the full wire path itself
+		// (see Server.List's doc comment), including the "/" + full
+		// queried path shape and the self-entry a real svnserve also
+		// sends -- both confirmed against a real server, and covered
+		// end-to-end by svnfs_integration_test.go; svnfs.readDir must
+		// cope with either, but this fake server doesn't need to
+		// reproduce them to exercise that.
+		var out []svn.Dirent
 		for name, c := range n.children {
 			out = append(out, svn.Dirent{
-				Path: "/" + joinSVNPath(path, name),
-				Kind: c.kind, Size: svnSize(c),
+				Path: name, Kind: c.kind, Size: svnSize(c),
 				CreatedRev: c.rev, CreatedDate: c.date, LastAuthor: c.author,
 			})
 		}

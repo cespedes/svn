@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"path"
+	"strings"
 )
 
 // A Server defines parameters for running a SVN server.
@@ -44,11 +46,18 @@ type Server struct {
 	// if rev is nil).
 	CheckPath func(path string, rev *uint) (string, error)
 
-	// List answers a "list" command, returning the directory entries under
+	// List answers a "list" command, returning the direct children of
 	// path at rev. depth is one of the protocol's depth words (e.g.
 	// "immediates"), fields selects which optional Dirent fields the
 	// client wants populated, and pattern, if non-empty, restricts the
 	// result to entries matching one of the given glob patterns.
+	//
+	// Only each entry's own base name matters in its Dirent.Path (e.g.
+	// "main.go", not "trunk/main.go" or any server-specific prefix):
+	// Serve rebuilds the full wire path itself from path and that base
+	// name. A real svn client has been seen to segfault given a
+	// differently-shaped path here, so this is deliberately not left to
+	// each List implementation to get right.
 	List func(path string, rev *uint, depth string, fields []string, pattern []string) ([]Dirent, error)
 
 	// GetFile answers a "get-file" command, returning the revision the
@@ -318,9 +327,20 @@ func (s *Server) Serve(r io.Reader, w io.Writer) error {
 			if err = conn.WriteSuccess([]any{[]any{}, []byte{}}); err != nil {
 				return err
 			}
+			// The wire path for each entry is rebuilt here as "/" plus
+			// the queried directory plus the entry's own base name,
+			// rather than sent as whatever d.Path happens to contain:
+			// a real svnserve always sends that full, slash-prefixed
+			// form (confirmed against one), and at least one real svn
+			// client has been seen to segfault on a "list" response
+			// that instead uses a bare, unprefixed child name.
+			listPrefix := "/" + strings.TrimPrefix(args.Path, "/")
+			if listPrefix != "/" {
+				listPrefix += "/"
+			}
 			for _, d := range dirents {
 				if err = conn.Write([]any{
-					[]byte(d.Path),
+					[]byte(listPrefix + path.Base(d.Path)),
 					d.Kind,
 					[]any{d.Size},
 					[]any{d.HasProps},
