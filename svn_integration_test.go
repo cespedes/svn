@@ -549,3 +549,106 @@ func TestClientUpdate(t *testing.T) {
 		}
 	})
 }
+
+// TestClientDiff drives Client.Diff against a real svnserve, against a
+// real working copy Client.Checkout produced (the same scenario
+// Client.Update itself covers -- see Diff's own doc comment on why it's
+// deliberately limited to comparing this Client's own connected
+// location's history, not two different repository locations or a bare
+// URL with no local content). Its own Editor reads Editor.OpenFile's
+// "before" content from that working copy exactly like Client.Update's
+// own would, but records Editor.CloseFile's "after" content instead of
+// overwriting anything -- confirming Diff never mutates the working copy
+// it's run against, unlike Update.
+func TestClientDiff(t *testing.T) {
+	repoURL := newRealRepo(t)
+	c, err := svn.Connect(repoURL)
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+
+	t.Run("diff from r1 to the latest revision", func(t *testing.T) {
+		dir := filepath.Join(t.TempDir(), "wc")
+		if err := os.Mkdir(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		one := 1
+		if _, err := c.Checkout(&one, newDiskEditor(t, dir)); err != nil {
+			t.Fatalf("Checkout: %v", err)
+		}
+
+		local := func(p string) string { return filepath.Join(dir, filepath.FromSlash(p)) }
+		type change struct{ before, after string }
+		changed := map[string]change{}
+		var added, deleted []string
+		editor := svn.Editor{
+			AddDir: func(path string, copyFrom *svn.EditorCopyFrom) error { return nil },
+			AddFile: func(path string, copyFrom *svn.EditorCopyFrom) error {
+				added = append(added, path)
+				return nil
+			},
+			DeleteEntry: func(path string, rev *int) error {
+				deleted = append(deleted, path)
+				return nil
+			},
+			OpenFile: func(path string, rev int) ([]byte, error) {
+				return os.ReadFile(local(path))
+			},
+			CloseFile: func(path string, content []byte) error {
+				before, _ := os.ReadFile(local(path)) // nil for a brand new (AddFile) path
+				changed[path] = change{before: string(before), after: string(content)}
+				return nil
+			},
+		}
+
+		rev, err := c.Diff(1, nil, editor)
+		if err != nil {
+			t.Fatalf("Diff: %v", err)
+		}
+		if rev != 3 {
+			t.Errorf("Diff() rev = %d, want 3", rev)
+		}
+
+		readme, ok := changed["README.md"]
+		if !ok {
+			t.Fatalf("README.md was not reported as changed")
+		}
+		if readme.before != "hello world\n" || readme.after != "hello world, v2\n" {
+			t.Errorf("README.md change = %+v, want before %q, after %q", readme, "hello world\n", "hello world, v2\n")
+		}
+		if _, ok := changed["trunk/main.go"]; ok {
+			t.Errorf("trunk/main.go (unchanged between r1 and r3) should never have been opened")
+		}
+		if len(added) != 1 || added[0] != "trunk/main_copy.go" {
+			t.Errorf("added = %v, want just [trunk/main_copy.go]", added)
+		}
+		if got := changed["trunk/main_copy.go"].after; got != "package main\n" {
+			t.Errorf("trunk/main_copy.go's new content = %q, want %q", got, "package main\n")
+		}
+		if len(deleted) != 0 {
+			t.Errorf("deleted = %v, want none", deleted)
+		}
+
+		// Diff must not have touched the working copy Checkout produced:
+		// it's still r1's own content, since nothing in this test's own
+		// Editor ever wrote anything back to disk.
+		readmeOnDisk, err := os.ReadFile(filepath.Join(dir, "README.md"))
+		if err != nil {
+			t.Fatalf("reading README.md: %v", err)
+		}
+		if string(readmeOnDisk) != "hello world\n" {
+			t.Errorf("README.md on disk = %q, want %q (Diff must not modify the working copy)", readmeOnDisk, "hello world\n")
+		}
+		if _, err := os.Stat(filepath.Join(dir, "trunk", "main_copy.go")); err == nil {
+			t.Errorf("trunk/main_copy.go should not have been created on disk by Diff")
+		}
+	})
+
+	t.Run("Diff after other commands on the same connection", func(t *testing.T) {
+		// If an earlier subtest's Diff left the connection desynced,
+		// this would fail (or hang).
+		if _, err := c.GetLatestRev(); err != nil {
+			t.Fatalf("GetLatestRev after Diff: %v", err)
+		}
+	})
+}

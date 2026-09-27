@@ -129,23 +129,16 @@ type pendingFile struct {
 	touched     bool
 }
 
-// reportAndApply drives the report/editor exchange shared by Checkout
-// and Update: sends "update" (target "", recurse true) for wantRev (nil
-// meaning the latest), a single root "set-path" reporting reportRev at
-// startEmpty, then "finish-report", and applies the resulting Editor
-// Command Set sequence via driveEditor. It returns the revision actually
-// reached (whatever the server's own "target-rev" reported). Callers
-// must already hold c.mu.
-func (c *Client) reportAndApply(wantRev *int, reportRev int, startEmpty bool, editor Editor) (int, error) {
-	lrev := []int{}
-	if wantRev != nil {
-		lrev = append(lrev, *wantRev)
-	}
-	if err := c.conn.Write([]any{
-		"update",
-		[]any{lrev, []byte(""), true},
-	}); err != nil {
-		return 0, fmt.Errorf("sending \"update\": %w", err)
+// reportAndApply drives the report/editor exchange shared by Checkout,
+// Update and Diff: sends the given Main Command Set command (cmd/params
+// -- "update" for Checkout/Update, "diff" for Diff), a single root
+// "set-path" reporting reportRev at startEmpty, then "finish-report", and
+// applies the resulting Editor Command Set sequence via driveEditor. It
+// returns the revision actually reached (whatever the server's own
+// "target-rev" reported). Callers must already hold c.mu.
+func (c *Client) reportAndApply(cmd string, params []any, reportRev int, startEmpty bool, editor Editor) (int, error) {
+	if err := c.conn.Write([]any{cmd, params}); err != nil {
+		return 0, fmt.Errorf("sending %q: %w", cmd, err)
 	}
 	if err := c.handleAuth(); err != nil {
 		return 0, err
@@ -154,7 +147,7 @@ func (c *Client) reportAndApply(wantRev *int, reportRev int, startEmpty bool, ed
 	// Report Command Set: a single "set-path" for the report's own root.
 	// The wire shape (path, rev, start-empty, lock-tokens, depth),
 	// confirmed against a real svnserve, has two more fields beyond what
-	// either Checkout's or Update's own report needs; a fixed
+	// Checkout's, Update's or Diff's own report needs; a fixed
 	// "infinity"/no-locks pair matches what a real client sends.
 	//
 	// reportRev matters even for a start-empty (Checkout) report, whose
@@ -168,8 +161,8 @@ func (c *Client) reportAndApply(wantRev *int, reportRev int, startEmpty bool, ed
 	// resolves and reports its true current revision here (confirmed by
 	// capture: it sends "get-latest-rev" before "update" for exactly
 	// this, even when the caller didn't ask for a specific revision), so
-	// both Checkout and Update do the same instead of trying to
-	// characterize further what svnserve actually needed it for.
+	// Checkout does the same instead of trying to characterize further
+	// what svnserve actually needed it for.
 	if err := c.conn.Write([]any{
 		"set-path",
 		[]any{[]byte(""), reportRev, startEmpty, []any{}, "infinity"},

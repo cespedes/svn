@@ -43,6 +43,14 @@ type Client struct {
 	// received from the server during Connect.
 	Info ReposInfo
 
+	// address is the URL this Client greeted the server with (Connect's
+	// or NewClient's own address argument, after Connect's file://→
+	// svn+ssh:// rewrite), which may be anchored below the repository
+	// root. Diff uses it as the "diff" command's own versusURL, since a
+	// real client sends this same URL for a same-path, two-revision
+	// diff (see Diff's own doc comment).
+	address string
+
 	// reconnect, if set, closes the current connection (killing any still
 	// -running subprocess first) and re-establishes it from scratch,
 	// including redoing the handshake. Connect sets this, since it
@@ -144,6 +152,7 @@ func NewClient(r io.Reader, w io.Writer, address string) (*Client, error) {
 // repos-info exchange that both Connect and NewClient need, once their
 // underlying connection is established.
 func (c *Client) handshake(address string) error {
+	c.address = address
 	var greet struct {
 		MinVer       int
 		MaxVer       int

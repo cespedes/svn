@@ -61,7 +61,11 @@ func (c *Client) Checkout(wantRev *int, editor Editor) (checkedOutRev int, err e
 		reportRev = latest
 	}
 
-	rev, err := c.reportAndApply(wantRev, reportRev, true, editor)
+	lrev := []int{}
+	if wantRev != nil {
+		lrev = append(lrev, *wantRev)
+	}
+	rev, err := c.reportAndApply("update", []any{lrev, []byte(""), true}, reportRev, true, editor)
 	if err != nil {
 		return 0, fmt.Errorf("svn: checkout: %w", err)
 	}

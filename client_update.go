@@ -48,7 +48,11 @@ func (c *Client) Update(fromRev int, wantRev *int, editor Editor) (checkedOutRev
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	rev, err := c.reportAndApply(wantRev, fromRev, false, editor)
+	lrev := []int{}
+	if wantRev != nil {
+		lrev = append(lrev, *wantRev)
+	}
+	rev, err := c.reportAndApply("update", []any{lrev, []byte(""), true}, fromRev, false, editor)
 	if err != nil {
 		return 0, fmt.Errorf("svn: update: %w", err)
 	}

@@ -14,11 +14,11 @@ a subset of ra_svn, described in detail below.
 
 This package implements the **read-only, unversioned-property, non-locking**
 part of ra_svn: browsing and reading a repository at a given revision, plus a
-plain `svn checkout` and a single-revision `svn update` (both sides -- see
-below) and, `svn.Server`-side only, serving a single-revision `svn diff`/
-`svn switch` too. It does not implement commits, a mixed-revision
-`update`/`diff`/`switch` (and so nothing that depends on that kind of thing,
-like `blame`), locking, or revision
+plain `svn checkout` and a single-revision `svn update`/`svn diff` (all three
+on both sides -- see below) and, `svn.Server`-side only, serving a
+single-revision `svn switch` too. It does not implement commits, a
+mixed-revision `update`/`diff`/`switch` (and so nothing that depends on that
+kind of thing, like `blame`), locking, or revision
 properties. There is
 no support for `svn://`'s raw TCP transport (only `file://` and `svn+ssh://`,
 which both exec `svnserve -t` — see below) or for the HTTP-based (DAV)
@@ -40,10 +40,11 @@ of this same table):
 | `ls` | ✅ | `List`; only "immediates" depth has been exercised — recursive listing depends on the server understanding other `depth` values, which `List` merely passes through |
 | `log` | ✅ | `Log`, including `-r`/revision ranges |
 | `export` | ✅ | recursive `List` + `GetFile` walk (`go-svn export <repo> [localdir]`), no report/editor exchange needed since it doesn't create a working copy |
-| `checkout` | ✅ for a plain checkout | `Client.Checkout` drives the same report/editor exchange the server side uses, reporting "I have nothing" and then parsing the resulting Editor Command Set sequence -- calling a caller-supplied [`Editor`](#checking-out-and-updating-sveditor)'s own fields for each node described, the same low-level, callback-driven style `Server`'s own API already uses. `Client` itself never touches a filesystem, a database, or anything else; `cmd/go-svn`'s own `checkout`/`update` subcommands (below) are what actually write to disk, built purely on this API. To check out a repository subdirectory, `Connect`/`NewClient` to that subdirectory's own URL directly; `Checkout` has no separate "path within the repository" parameter (see its own doc comment for why) |
+| `checkout` | ✅ for a plain checkout | `Client.Checkout` drives the same report/editor exchange the server side uses, reporting "I have nothing" and then parsing the resulting Editor Command Set sequence -- calling a caller-supplied [`Editor`](#checking-out-updating-and-diffing-sveditor)'s own fields for each node described, the same low-level, callback-driven style `Server`'s own API already uses. `Client` itself never touches a filesystem, a database, or anything else; `cmd/go-svn`'s own `checkout`/`update` subcommands (below) are what actually write to disk, built purely on this API. To check out a repository subdirectory, `Connect`/`NewClient` to that subdirectory's own URL directly; `Checkout` has no separate "path within the repository" parameter (see its own doc comment for why) |
 | `update` | ✅ for a single-revision update | `Client.Update` reports the caller as already having some `fromRev`, at one uniform revision -- the real (non-start-empty) report shape `IsSingleRevisionUpdate` recognizes on the server side -- and calls the same `Editor`'s fields for only what actually changed: an unmodified file is never mentioned at all, a modified one's new content arrives via `Editor.OpenFile`/`ApplyTextdelta`/`CloseFile` (as a real, possibly incremental delta against whatever content `OpenFile` itself returns, not just a full replacement), and added/removed nodes via `Editor.AddDir`/`AddFile`/`DeleteEntry`. A mixed-revision working copy isn't supported, the same limitation `Server.UpdateEdit` has |
 | `switch` | ❌ | needs target-selection logic (diffing against a *different* repository location, not just a newer revision of the same one), which `Client.Update`'s own report/editor plumbing doesn't build yet |
-| `diff` / `blame` (`praise`) | ❌ | needs `update`/`get-file-revs`, neither implemented |
+| `diff` | ✅ for a single-revision comparison against this Client's own history | `Client.Diff` sends "diff" instead of "update", reporting `fromRev` the same way `Update` does, but reuses the exact same `Editor` callbacks -- there's no separate "diff" callback shape, since the underlying exchange is identical either way (see `Server.Diff`'s own reuse of `UpdateEdit` server-side). What differs is only what the caller does with `Editor.OpenFile`'s "before" content and `Editor.CloseFile`'s "after" content -- typically computing and printing a textual diff instead of overwriting anything, which (like everywhere else in this package) `Client.Diff` itself never does. Comparing two different repository locations (`svn diff OLD-URL NEW-URL`) isn't supported, the same limitation `Server.Diff` has |
+| `blame` (`praise`) | ❌ | needs `get-file-revs`, not implemented |
 | `propget` / `proplist` on a file | partial | `GetFile`'s properties are returned if requested; there's no dedicated single-property call |
 | `propget` / `proplist` on a directory | ❌ | |
 | `lock` / `unlock` | ❌ | |
@@ -65,12 +66,12 @@ In practice: a real `svn info`/`ls`/`cat`/`log`/`checkout`/`update`/`diff`/`swit
 against a `svn.Server` implementation works (confirmed against a real `svn`
 client — see [Development](#development)), as long as the working copy
 isn't "mixed revision"; `svn commit` does not. In the other direction,
-`svn.Client.Checkout`/`Update` work against a real `svnserve` the same way
-(confirmed in `svn_integration_test.go`), including a real svnserve sending a
-modified file's content as a genuine incremental delta against the client's
-own reported base rather than a full replacement (confirmed by temporarily
-breaking that handling and watching `TestClientUpdate` fail exactly as
-expected).
+`svn.Client.Checkout`/`Update`/`Diff` work against a real `svnserve` the same
+way (confirmed in `svn_integration_test.go`), including a real svnserve
+sending a modified file's content as a genuine incremental delta against the
+client's own reported base rather than a full replacement (confirmed by
+temporarily breaking that handling and watching `TestClientUpdate` fail
+exactly as expected).
 
 ## Installation
 
@@ -106,14 +107,18 @@ read-only. A `Client` made with `NewClient` (over a caller-supplied
 connection) can't do this, since it has no way to reopen that connection
 itself.
 
-## Checking out and updating: svn.Editor
+## Checking out, updating and diffing: svn.Editor
 
-`Client.Checkout`/`Client.Update` drive a real "svn checkout"/"svn update"
-report/editor exchange, but -- like every other part of this package --
-never touch a filesystem, a database, or anything else on their own: what
-each node in the resulting tree actually *means* is entirely up to a
-caller-supplied `svn.Editor`, a struct of callback fields (one per Editor
-Command Set command) mirroring `svn.Server`'s own style:
+`Client.Checkout`/`Client.Update`/`Client.Diff` each drive a real "svn
+checkout"/"svn update"/"svn diff" report/editor exchange, but -- like every
+other part of this package -- never touch a filesystem, a database, or
+anything else on their own: what each node in the resulting tree actually
+*means* is entirely up to a caller-supplied `svn.Editor`, a struct of
+callback fields (one per Editor Command Set command) mirroring `svn.Server`'s
+own style. All three methods share the exact same `Editor`: `Diff` is what
+`Update` would be if, instead of overwriting `Editor.OpenFile`'s own
+"before" content with `Editor.CloseFile`'s "after" content, the caller
+printed a diff between the two instead:
 
 ```go
 var written int
