@@ -31,8 +31,10 @@ either anonymous access or a transport that already authenticated the
 connection (e.g. `svn+ssh://`'s SSH layer).
 
 Concretely, this is what works and what doesn't, on each side (see
-[PROTOCOL.md](PROTOCOL.md) for the exhaustive, command-by-command version
-of this same table):
+[docs/protocol.md](docs/protocol.md) for the exhaustive, command-by-command version
+of this same table, and [docs/architecture.md](docs/architecture.md) for
+how the Editor Command Set exchange behind `checkout`/`update`/`diff`/
+`switch`/`commit` is actually implemented on each side):
 
 ### Client (`svn.Client`, `go-svn`)
 
@@ -43,15 +45,15 @@ of this same table):
 | `ls` | ✅ | `List`; only "immediates" depth has been exercised — recursive listing depends on the server understanding other `depth` values, which `List` merely passes through |
 | `log` | ✅ | `Log`, including `-r`/revision ranges |
 | `export` | ✅ | recursive `List` + `GetFile` walk (`go-svn export <repo> [localdir]`), no report/editor exchange needed since it doesn't create a working copy |
-| `checkout` | ✅ for a plain checkout | `Client.Checkout` drives the same report/editor exchange the server side uses, reporting "I have nothing" and then parsing the resulting Editor Command Set sequence -- calling a caller-supplied [`Editor`](#checking-out-updating-and-diffing-sveditor)'s own fields for each node described, the same low-level, callback-driven style `Server`'s own API already uses. `Client` itself never touches a filesystem, a database, or anything else; `cmd/go-svn`'s own `checkout`/`update` subcommands (below) are what actually write to disk, built purely on this API. To check out a repository subdirectory, `Connect`/`NewClient` to that subdirectory's own URL directly; `Checkout` has no separate "path within the repository" parameter (see its own doc comment for why) |
-| `update` | ✅ for a single-revision update | `Client.Update` reports the caller as already having some `fromRev`, at one uniform revision -- the real (non-start-empty) report shape `IsSingleRevisionUpdate` recognizes on the server side -- and calls the same `Editor`'s fields for only what actually changed: an unmodified file is never mentioned at all, a modified one's new content arrives via `Editor.OpenFile`/`ApplyTextdelta`/`CloseFile` (as a real, possibly incremental delta against whatever content `OpenFile` itself returns, not just a full replacement), and added/removed nodes via `Editor.AddDir`/`AddFile`/`DeleteEntry`. A mixed-revision working copy isn't supported, the same limitation `Server.UpdateEdit` has |
-| `switch` | ❌ | needs target-selection logic (diffing against a *different* repository location, not just a newer revision of the same one), which `Client.Update`'s own report/editor plumbing doesn't build yet |
-| `diff` | ✅ for a single-revision comparison against this Client's own history | `Client.Diff` sends "diff" instead of "update", reporting `fromRev` the same way `Update` does, but reuses the exact same `Editor` callbacks -- there's no separate "diff" callback shape, since the underlying exchange is identical either way (see `Server.Diff`'s own reuse of `UpdateEdit` server-side). What differs is only what the caller does with `Editor.OpenFile`'s "before" content and `Editor.CloseFile`'s "after" content -- typically computing and printing a textual diff instead of overwriting anything, which (like everywhere else in this package) `Client.Diff` itself never does. Comparing two different repository locations (`svn diff OLD-URL NEW-URL`) isn't supported, the same limitation `Server.Diff` has |
+| `checkout` | ✅ for a plain checkout | `Client.Checkout` drives the same report/editor exchange the server side uses, calling a caller-supplied [`Editor`](#checking-out-updating-and-diffing-sveditor)'s own fields for each node described. To check out a repository subdirectory, `Connect`/`NewClient` to that subdirectory's own URL directly |
+| `update` | ✅ for a single-revision update | `Client.Update` calls the same `Editor`'s fields for only what actually changed since `fromRev`. A mixed-revision working copy isn't supported |
+| `switch` | ❌ | needs target-selection logic (diffing against a *different* repository location), which `Client.Update`'s own plumbing doesn't build yet |
+| `diff` | ✅ for a single-revision comparison against this Client's own history | `Client.Diff` reuses `Update`'s own `Editor`; comparing two different repository locations (`svn diff OLD-URL NEW-URL`) isn't supported |
 | `blame` (`praise`) | ❌ | needs `get-file-revs`, not implemented |
 | `propget` / `proplist` on a file | partial | `GetFile`'s properties are returned if requested; there's no dedicated single-property call |
 | `propget` / `proplist` on a directory | ❌ | |
 | `lock` / `unlock` | ❌ | |
-| `commit` / `add` / `delete` / `mkdir` / `import` | ✅ | `Client.Commit` sends "commit" and then drives the client's own end of the Editor Command Set, built by the caller via `EditorWriter` (the same builder `Server.FinishReport` callbacks already use on the read side, just travelling in the opposite direction on the wire) -- there's no `add`/`delete`/`mkdir`/`import`-specific method, since all of them are just a particular shape of editor sequence handed to the same `Commit`. `Client` itself never touches a filesystem: `cmd/go-svn commit` is what actually builds that `[]Item`, by comparing a real, disk-backed working copy against the repository (see below) -- there's no staged add/remove step, unlike a real `svn add`/`svn rm`; whatever differs from the repository is what gets committed |
+| `commit` / `add` / `delete` / `mkdir` / `import` | ✅ | `Client.Commit` sends a caller-built Editor Command Set (`EditorWriter`, the same builder used on the read side); `cmd/go-svn commit` builds it by comparing a working copy against the repository (see below) -- there's no staged add/remove step, unlike a real `svn add`/`svn rm` |
 | `mergeinfo` | ❌ | |
 
 ### Server (`svn.Server`)
@@ -62,25 +64,17 @@ of this same table):
 | `get-iprops` | ✅ | always reports no inherited properties (neither modeled anywhere in this package); not gated behind a callback field, since a real client needs an answer to it to complete even a plain checkout below the repository root |
 | `get-dir` | ✅ | a thin wrapper around `Server.List`; superseded by `list` for a modern client's normal directory browsing, but `svn diff` still falls back to it to enumerate a deleted directory's former contents |
 | `reparent` | ✅ | purely informational, like `set-path`; a real client commonly reparents an existing session (rather than opening a new connection) while preparing a `switch` -- see the next row |
-| `set-path`, `update`, `diff`, `switch`, `finish-report` | ✅ for a checkout or a single-revision update/diff/switch | `Serve` accumulates every `set-path` into a `[]ReportedPath` and hands it to `FinishReport`. `IsPlainCheckout` + `Server.CheckoutEdit` handle a plain checkout (the client has nothing yet); `IsSingleRevisionUpdate` + `Server.UpdateEdit` handle a real `update` or `diff` for a working copy that isn't "mixed revision" (every subtree at the same revision), walking both the client's revision and the target revision via `List`/`GetFile` and describing only what changed -- new/removed/modified nodes -- skipping an unmodified file entirely (a matching `CreatedRev` is conclusive proof of that, since it's the same path at two revisions); `Server.SwitchEdit` handles a `switch` the same way, but diffing two different repository locations (corresponding to each other by name, not by shared history) rather than two revisions of the same one -- and, since a matching `CreatedRev` proves nothing across two different paths (two unrelated files can share one by pure coincidence, e.g. both added in the same commit), it never skips a same-named file as unchanged, always resending its content instead. A `diff` against a bare repository URL (no local working copy) additionally needs `get-dir` (above). `UpdateEdit`/`SwitchEdit`'s `target` parameter also handles a client naming a single nested file or subdirectory (`svn update path/to/file`, `svn diff path/to/file`), not just a whole working copy: every path segment strictly between the report's own root and the target is walked but never itself described in the editor sequence, since a real client computes the target's own local path by joining every directory name it receives and expects the target's parent to coincide with the edit's root regardless of how many real path segments separate them (see `UpdateEdit`'s doc comment, and `RepoRelativePath` for how a `diff`/`switch` callback recovers the target's true path when its session is anchored above the target's own parent). A mixed-revision working copy (part of it pinned to an older revision) isn't recognized by any of these |
-| everything else (`delete-path`/`link-path`, most of the editor command set beyond what a checkout/update/diff/switch needs, `commit`, locking, revision properties, `get-mergeinfo`, `get-file-revs`, `replay`, ...) | ❌ | not handled: replies "Unknown command" — see [PROTOCOL.md](PROTOCOL.md) for the full list |
+| `set-path`, `update`, `diff`, `switch`, `finish-report` | ✅ for a checkout or a single-revision update/diff/switch | `IsPlainCheckout`/`Server.CheckoutEdit` handle a plain checkout; `IsSingleRevisionUpdate`/`Server.UpdateEdit`/`Server.SwitchEdit` handle a real `update`/`diff`/`switch` for a working copy that isn't "mixed revision", diffing the client's revision against the target (or a different repository location, for `switch`) and describing only what changed. See [docs/architecture.md](docs/architecture.md) for how this works and its wire-level gotchas |
+| everything else (`delete-path`/`link-path`, most of the editor command set beyond what a checkout/update/diff/switch needs, `commit`, locking, revision properties, `get-mergeinfo`, `get-file-revs`, `replay`, ...) | ❌ | not handled: replies "Unknown command" — see [docs/protocol.md](docs/protocol.md) for the full list |
 
 In practice: a real `svn info`/`ls`/`cat`/`log`/`checkout`/`update`/`diff`/`switch`
 against a `svn.Server` implementation works (confirmed against a real `svn`
 client — see [Development](#development)), as long as the working copy
 isn't "mixed revision"; `svn commit` does not (there is no `Server.Commit`
-or equivalent -- see the client/server tables above). In the other
-direction, `svn.Client.Checkout`/`Update`/`Diff`/`Commit` work against a real
-`svnserve` the same way (confirmed in `svn_integration_test.go`), including a
-real svnserve sending a modified file's content as a genuine incremental
-delta against the client's own reported base rather than a full replacement
-(confirmed by temporarily breaking that handling and watching
-`TestClientUpdate` fail exactly as expected), and including `Client.Commit`'s
-own commit message needing to be sent as a length-prefixed string rather
-than a bare word (confirmed the same way: a real svnserve reports "Malformed
-network data" and drops the connection outright, rather than an ordinary
-protocol failure, given a commit message a bare word can't hold, e.g. one
-containing a space).
+or equivalent). In the other direction, `svn.Client.Checkout`/`Update`/
+`Diff`/`Commit` work against a real `svnserve` the same way (confirmed in
+`svn_integration_test.go`). See [docs/architecture.md](docs/architecture.md)
+for the wire-level gotchas this interop testing found along the way.
 
 ## Installation
 
@@ -144,10 +138,11 @@ editor := svn.Editor{
 rev, err := c.Checkout(nil, editor) // nil: the latest revision
 ```
 
-See [`cmd/go-svn`](cmd/go-svn)'s own `checkout`/`update` subcommands for a
-complete, filesystem-backed `Editor` (creating real files/directories under
-a destination directory) built purely on this API -- the library
-deliberately stops short of providing one itself.
+See [`examples/checkout`](examples/checkout) for a small runnable version
+of the snippet above, and [`cmd/go-svn`](cmd/go-svn)'s own `checkout`/
+`update` subcommands for a complete, filesystem-backed `Editor` (creating
+real files/directories under a destination directory) built purely on
+this API -- the library deliberately stops short of providing one itself.
 
 ## Using the server
 
@@ -207,29 +202,22 @@ go-svn log -r100:200 svn+ssh://example.com/repo
 go-svn export svn+ssh://example.com/repo/trunk
 go-svn checkout svn+ssh://example.com/repo/trunk
 go-svn update trunk
+go-svn commit -m "fix bug" trunk
 ```
 
 Usage: `go-svn <subcommand> [-r revision[:revision2]] [-v] <repo>`, matching
-a real `svn`'s own command-line shape: `-r`/`-v` go *after* the subcommand
-name, not before it (`go-svn cat -r100 URL`, not `go-svn -r 100 cat URL`),
-and only the subcommands that actually use a given option accept it at all
-(passing one to a subcommand that doesn't is an error, not silently
-ignored). Subcommands: `info`, `cat`, `ls`, `log`, `export <repo>
-[localdir]`, `checkout <repo> [localdir]`, `update <localdir>`. `-r rev` or
-`-r rev1:rev2` (either joined, as `-r100`/`-r100:200`, or as a separate
-argument, `-r 100`/`-r 100:200`) selects a revision or revision range where
-the subcommand supports it, and `-v` asks for more detail (`ls`, `log`).
-`export` writes a clean copy of `repo` (no version-control metadata) to
-`localdir`, or to a directory named after `repo`'s own last path segment if
-`localdir` is
-omitted. `checkout` writes the same kind of plain, unversioned tree
-`export` does, but by driving a real report/editor exchange (see
-`svn.Editor` above) instead of a one-shot recursive walk -- the difference
-being that `update <localdir>` can then bring it up to a newer revision in
-place, touching only what actually changed; `checkout`/`update` remember
-which repository URL and revision a directory holds in a small
-`.go-svn-checkout` sidecar file (not a real `.svn` working copy database)
-so `update` needs no URL argument.
+a real `svn`'s own command-line shape: `-r`/`-v`/`-m` go *after* the
+subcommand name, not before it (`go-svn cat -r100 URL`, not `go-svn -r 100
+cat URL`), and only the subcommands that actually use a given option accept
+it at all. Subcommands: `info`, `cat`, `ls`, `log`, `export <repo>
+[localdir]`, `checkout <repo> [localdir]`, `update [localdir]`, `commit -m
+message [localdir]`. `checkout` writes a plain, unversioned tree (no `.svn`
+working-copy metadata) by driving a real report/editor exchange (see
+`svn.Editor` above); `update`/`commit` bring it forward or send local
+changes back, touching only what changed, and default `localdir` to the
+current directory if omitted, like a real `svn`. See
+[`cmd/go-svn`](cmd/go-svn)'s own README for the full option/subcommand
+reference.
 
 ## Other examples
 
