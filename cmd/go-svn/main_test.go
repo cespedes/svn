@@ -238,4 +238,37 @@ func TestCheckoutAndUpdate(t *testing.T) {
 	if got := readFile(t, filepath.Join(dest, "trunk", "newfile.go")); got != "package main\n" {
 		t.Errorf("trunk/newfile.go = %q, want %q", got, "package main\n")
 	}
+
+	// "checkout" of a URL that names a file, not a directory: reported
+	// as a real bug ("go-svn checkout" of a file URL surfaced only as a
+	// confusing, low-level svnserve error, "160005 Cannot replace a
+	// directory from within", instead of an early, clear one -- a real
+	// "svn checkout" itself rejects this up front with "URL '...' refers
+	// to a file, not a directory").
+	t.Run("checkout of a file URL fails clearly", func(t *testing.T) {
+		fileDest := filepath.Join(t.TempDir(), "co")
+		var out bytes.Buffer
+		err := run([]string{"go-svn", "checkout", repoURL + "/trunk/main.go", fileDest}, &out)
+		if err == nil {
+			t.Fatalf("checkout of a file URL succeeded, want an error\noutput:\n%s", out.String())
+		}
+		if !strings.Contains(err.Error(), "refers to a file, not a directory") {
+			t.Errorf("error = %q, want it to mention the URL refers to a file, not a directory", err.Error())
+		}
+		if _, statErr := os.Stat(fileDest); statErr == nil {
+			t.Errorf("checkout of a file URL should not have created %s", fileDest)
+		}
+	})
+
+	t.Run("checkout of a nonexistent URL fails clearly", func(t *testing.T) {
+		missingDest := filepath.Join(t.TempDir(), "co")
+		var out bytes.Buffer
+		err := run([]string{"go-svn", "checkout", repoURL + "/does-not-exist", missingDest}, &out)
+		if err == nil {
+			t.Fatalf("checkout of a nonexistent URL succeeded, want an error\noutput:\n%s", out.String())
+		}
+		if !strings.Contains(err.Error(), "does not exist") {
+			t.Errorf("error = %q, want it to mention the URL does not exist", err.Error())
+		}
+	})
 }

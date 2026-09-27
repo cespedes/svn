@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/url"
 	"os"
 	"path"
@@ -413,6 +414,29 @@ func svnCheckout(repo string, lrev *int, dest string, stdout io.Writer) error {
 	c, err := svn.Connect(repo)
 	if err != nil {
 		return err
+	}
+
+	// A real "svn checkout" only ever supports a directory (there's no
+	// wire-level reason to reject a file, but a real client's own
+	// working-copy layer refuses the request up front rather than
+	// producing whatever an editor sequence anchored at a file might
+	// mean), and obviously requires the URL to exist at all -- both
+	// checked here, with wording that mirrors a real client's own
+	// messages, rather than letting either case reach Client.Checkout:
+	// doing so instead surfaces as a confusing, low-level svnserve
+	// report-processing error ("160005 Cannot replace a directory from
+	// within" for a file URL, "160005 Target path '...' does not exist"
+	// for one that doesn't exist at all), since nothing about the
+	// report/editor exchange itself is actually invalid in either case.
+	stat, err := c.Stat("", lrev)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("checkout: URL '%s' does not exist", repo)
+		}
+		return err
+	}
+	if stat.Kind != "dir" {
+		return fmt.Errorf("checkout: URL '%s' refers to a %s, not a directory", repo, stat.Kind)
 	}
 
 	if dest == "" {
