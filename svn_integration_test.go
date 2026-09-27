@@ -5,7 +5,9 @@ package svn_test
 // `go test ./...` still works on a machine without SVN installed.
 
 import (
+	"crypto/md5"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -649,6 +651,148 @@ func TestClientDiff(t *testing.T) {
 		// this would fail (or hang).
 		if _, err := c.GetLatestRev(); err != nil {
 			t.Fatalf("GetLatestRev after Diff: %v", err)
+		}
+	})
+}
+
+// checksum returns content's MD5 checksum as a lowercase hex string, the
+// form EditorWriter.CloseFile expects -- a real client always sends one
+// on commit (confirmed by capture), so this test does too rather than
+// relying on it being accepted as optional.
+func checksum(content []byte) []byte {
+	return []byte(fmt.Sprintf("%x", md5.Sum(content)))
+}
+
+// TestClientCommit drives Client.Commit against a real svnserve: builds an
+// Editor Command Set by hand via [svn.EditorWriter] (the same building
+// block [svn.Server]'s own FinishReport callbacks use on the read side)
+// and confirms both that the reported CommitInfo looks right and that the
+// new revision actually contains what was sent -- checked two ways, via
+// this same Client's own GetFile and via a real "svn cat" run
+// independently of this package, in case something about the commit only
+// happens to look right through our own reading code.
+func TestClientCommit(t *testing.T) {
+	repoURL := newRealRepo(t)
+	c, err := svn.Connect(repoURL)
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+
+	svnCat := func(t *testing.T, path string) string {
+		t.Helper()
+		out, err := exec.Command("svn", "--non-interactive", "cat", repoURL+"/"+path).CombinedOutput()
+		if err != nil {
+			t.Fatalf("svn cat %s: %v\n%s", path, err, out)
+		}
+		return string(out)
+	}
+
+	t.Run("commit a new file into an existing directory", func(t *testing.T) {
+		latest, err := c.GetLatestRev()
+		if err != nil {
+			t.Fatalf("GetLatestRev: %v", err)
+		}
+
+		content := []byte("new content\n")
+		e := svn.NewEditorWriter()
+		if err := e.OpenRoot(nil); err != nil {
+			t.Fatal(err)
+		}
+		if err := e.OpenDir("trunk", uint(latest)); err != nil {
+			t.Fatal(err)
+		}
+		if err := e.AddFile("trunk/newfile.txt", nil); err != nil {
+			t.Fatal(err)
+		}
+		if err := e.ApplyTextdelta(content, nil); err != nil {
+			t.Fatal(err)
+		}
+		if err := e.CloseFile(checksum(content)); err != nil {
+			t.Fatal(err)
+		}
+		if err := e.CloseDir(); err != nil {
+			t.Fatal(err)
+		}
+		if err := e.CloseDir(); err != nil {
+			t.Fatal(err)
+		}
+		items, err := e.Items()
+		if err != nil {
+			t.Fatalf("Items: %v", err)
+		}
+
+		info, err := c.Commit("add newfile.txt", items)
+		if err != nil {
+			t.Fatalf("Commit: %v", err)
+		}
+		if info.Rev != latest+1 {
+			t.Errorf("Commit() rev = %d, want %d", info.Rev, latest+1)
+		}
+		if info.Date == "" {
+			t.Errorf("Commit() Date is empty")
+		}
+		if info.Author == "" {
+			t.Errorf("Commit() Author is empty")
+		}
+
+		_, got, err := c.GetFile("trunk/newfile.txt", nil, false, true)
+		if err != nil {
+			t.Fatalf("GetFile: %v", err)
+		}
+		if string(got) != string(content) {
+			t.Errorf("trunk/newfile.txt content = %q, want %q", got, content)
+		}
+		if got := svnCat(t, "trunk/newfile.txt"); got != string(content) {
+			t.Errorf("svn cat trunk/newfile.txt = %q, want %q", got, content)
+		}
+	})
+
+	t.Run("commit a modification to an existing file", func(t *testing.T) {
+		latest, err := c.GetLatestRev()
+		if err != nil {
+			t.Fatalf("GetLatestRev: %v", err)
+		}
+
+		content := []byte("hello world, v3\n")
+		e := svn.NewEditorWriter()
+		if err := e.OpenRoot(nil); err != nil {
+			t.Fatal(err)
+		}
+		if err := e.OpenFile("README.md", uint(latest)); err != nil {
+			t.Fatal(err)
+		}
+		if err := e.ApplyTextdelta(content, nil); err != nil {
+			t.Fatal(err)
+		}
+		if err := e.CloseFile(checksum(content)); err != nil {
+			t.Fatal(err)
+		}
+		if err := e.CloseDir(); err != nil {
+			t.Fatal(err)
+		}
+		items, err := e.Items()
+		if err != nil {
+			t.Fatalf("Items: %v", err)
+		}
+
+		info, err := c.Commit("update README again", items)
+		if err != nil {
+			t.Fatalf("Commit: %v", err)
+		}
+		if info.Rev != latest+1 {
+			t.Errorf("Commit() rev = %d, want %d", info.Rev, latest+1)
+		}
+
+		if got := svnCat(t, "README.md"); got != string(content) {
+			t.Errorf("svn cat README.md = %q, want %q", got, content)
+		}
+	})
+
+	t.Run("Commit after other commands on the same connection", func(t *testing.T) {
+		// If an earlier subtest's Commit left the connection desynced,
+		// this would fail (or hang).
+		if _, err := c.GetLatestRev(); err != nil {
+			t.Fatalf("GetLatestRev after Commit: %v", err)
 		}
 	})
 }

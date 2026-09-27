@@ -22,7 +22,7 @@ These are the commands a client sends to ask the server to do something.
 | `change-rev-prop2` | ❌ | ❌ | |
 | `rev-proplist` | ❌ | ❌ | |
 | `rev-prop` | ❌ | ❌ | |
-| `commit` | ❌ | ❌ | no write support anywhere in this package |
+| `commit` | ✅ | ❌ | `Client.Commit` sends this and then drives the client's own end of the Editor Command Set (see below); `Server` has no way to receive one -- no case in `server.go`'s switch at all |
 | `get-file` | ✅ | ✅ | `Client.GetFile`; `server.go`'s `"get-file"` case |
 | `get-dir` | ❌ | ✅ | superseded by `list`, which `server.go`'s own directory-listing code uses internally too (this case is a thin wrapper around `Server.List`) -- a modern client generally sends `list` instead, but `svn diff` still falls back to `get-dir` to enumerate a deleted directory's former contents, despite `Server.Serve` always advertising the `list` capability |
 | `check-path` | ❌ | ✅ | `Server.CheckPath` callback exists and is wired up, but `Client` has no method to send this command |
@@ -72,10 +72,10 @@ describe a real, per-subtree-mixed-revision working copy.
 
 Describes a tree of changes, one command per node touched. Used in two
 directions: server → client while driving an `update`/`switch` (after
-`finish-report`), and client → server while performing a `commit`. Only
-the client → server, `commit` direction is entirely unparsed and
-unproduced by either side (no write support anywhere in this package).
-Generating the server → client direction is what `EditorWriter`
+`finish-report`), and client → server while performing a `commit`. The
+client → server, `commit` direction is produced (by `Client.Commit`, see
+below) but not parsed by anything in this package: there is no `Server`
+side to receive one. Generating the server → client direction is what `EditorWriter`
 (`editor.go`) is for -- one typed method per command below, building up
 the `[]Item` a `Server.FinishReport` implementation can return -- while
 *parsing* that same direction is what `driveEditor` (`client_editor.go`)
@@ -183,6 +183,37 @@ from `target`. A mixed-revision `update` still needs a caller to drive
 `abort-edit` specifically are always sent automatically by `server.go`
 itself (not via `EditorWriter`) to end the exchange once `FinishReport`
 returns.
+
+`Client.Commit` (`client_commit.go`) drives the *other* direction of this
+same Editor Command Set: it sends "commit", reads the resulting ack (the
+usual empty-auth-request pre-ack followed by a plain empty success,
+meaning "go ahead and stream the edit"), writes out a caller-supplied
+`[]Item` -- built via the exact same `EditorWriter` `Server.FinishReport`
+callbacks already use, just travelling client → server this time, with
+no acks read in between the individual commands (matching a real
+client's own behavior) -- then sends `close-edit` and reads its ack
+(mirroring how `Serve`'s own `finish-report` handling reads a *client's*
+close-edit ack in the other direction), and finally reads the deferred
+response to the original "commit" command: another empty-auth-request
+pre-ack, followed by a `( new-rev:number [ date:string ] [
+author:string ] [ post-commit-err:string ] )` tuple (`CommitInfo` in
+`types.go`) -- confirmed by real wire capture to be sent bare, without
+the `( success ( ... ) )` envelope every other command's real response
+gets (a `( failure ( ... ) )` envelope is still used here for an actual
+error, e.g. an out-of-date commit, so `Client.Commit` still recognizes
+and returns that shape as a Go error). The table below covers the
+server → client direction only (`Client`'s own parsing side, `Server`'s
+own writing side, via `EditorWriter`); `Commit`'s own, reverse use of
+`EditorWriter` to *write* this same command set isn't a new column, since
+it's the exact same builder, just fed to `Commit` instead of returned
+from `FinishReport`. One thing that *is* new to the write side, only
+exercised by `Commit`: `EditorWriter`'s own commit-message argument must
+be sent as a length-prefixed string, not the bare word Go's plain
+`string` type marshals to by default -- confirmed the hard way, since a
+real svnserve reports "Malformed network data" and drops the connection
+outright, rather than an ordinary protocol failure, given a commit
+message a bare word can't hold (e.g. one containing a space, which is
+effectively every real commit message).
 
 | Command | Client | Server |
 | --- | --- | --- |

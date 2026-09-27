@@ -105,6 +105,25 @@ type ChangedPathInfo struct {
 	PropMods bool
 }
 
+// CommitInfo is the response for the "commit" command, once the whole
+// Editor Command Set describing the commit has been sent and
+// "close-edit" acked.
+type CommitInfo struct {
+	// Rev is the new revision the commit created.
+	Rev int
+	// Date is the new revision's commit date, as an ISO 8601 timestamp,
+	// or empty if the server didn't report one.
+	Date string
+	// Author is the value of the new revision's svn:author property, or
+	// empty if the server didn't report one.
+	Author string
+	// PostCommitErr holds a post-commit hook's own error message, if the
+	// hook failed after the commit itself had already succeeded (the
+	// commit is not undone by this). Empty if the hook succeeded or
+	// there is none.
+	PostCommitErr string
+}
+
 // LogEntry is every one of the responses for the "log" command.
 type LogEntry struct {
 	// Changed lists the paths that were added, modified, deleted or

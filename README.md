@@ -16,7 +16,10 @@ This package implements the **read-only, unversioned-property, non-locking**
 part of ra_svn: browsing and reading a repository at a given revision, plus a
 plain `svn checkout` and a single-revision `svn update`/`svn diff` (all three
 on both sides -- see below) and, `svn.Server`-side only, serving a
-single-revision `svn switch` too. It does not implement commits, a
+single-revision `svn switch` too. `svn.Client`-side, it also implements
+`commit`, driving the client's own end of the Editor Command Set exchange --
+but only `svn.Client`-side: a `svn.Server` implementation still cannot
+*receive* a commit from a real client. It does not implement a
 mixed-revision `update`/`diff`/`switch` (and so nothing that depends on that
 kind of thing, like `blame`), locking, or revision
 properties. There is
@@ -48,7 +51,7 @@ of this same table):
 | `propget` / `proplist` on a file | partial | `GetFile`'s properties are returned if requested; there's no dedicated single-property call |
 | `propget` / `proplist` on a directory | ❌ | |
 | `lock` / `unlock` | ❌ | |
-| `commit` / `add` / `delete` / `mkdir` / `import` | ❌ | no write support at all |
+| `commit` / `add` / `delete` / `mkdir` / `import` | ✅ | `Client.Commit` sends "commit" and then drives the client's own end of the Editor Command Set, built by the caller via `EditorWriter` (the same builder `Server.FinishReport` callbacks already use on the read side, just travelling in the opposite direction on the wire) -- there's no `add`/`delete`/`mkdir`/`import`-specific method, since all of them are just a particular shape of editor sequence handed to the same `Commit`. `Client` itself never touches a filesystem: `cmd/go-svn` has no `commit` subcommand yet (nothing in `cmd/go-svn` currently builds a `[]Item` from a real, disk-backed working copy's own local changes) |
 | `mergeinfo` | ❌ | |
 
 ### Server (`svn.Server`)
@@ -65,13 +68,19 @@ of this same table):
 In practice: a real `svn info`/`ls`/`cat`/`log`/`checkout`/`update`/`diff`/`switch`
 against a `svn.Server` implementation works (confirmed against a real `svn`
 client — see [Development](#development)), as long as the working copy
-isn't "mixed revision"; `svn commit` does not. In the other direction,
-`svn.Client.Checkout`/`Update`/`Diff` work against a real `svnserve` the same
-way (confirmed in `svn_integration_test.go`), including a real svnserve
-sending a modified file's content as a genuine incremental delta against the
-client's own reported base rather than a full replacement (confirmed by
-temporarily breaking that handling and watching `TestClientUpdate` fail
-exactly as expected).
+isn't "mixed revision"; `svn commit` does not (there is no `Server.Commit`
+or equivalent -- see the client/server tables above). In the other
+direction, `svn.Client.Checkout`/`Update`/`Diff`/`Commit` work against a real
+`svnserve` the same way (confirmed in `svn_integration_test.go`), including a
+real svnserve sending a modified file's content as a genuine incremental
+delta against the client's own reported base rather than a full replacement
+(confirmed by temporarily breaking that handling and watching
+`TestClientUpdate` fail exactly as expected), and including `Client.Commit`'s
+own commit message needing to be sent as a length-prefixed string rather
+than a bare word (confirmed the same way: a real svnserve reports "Malformed
+network data" and drops the connection outright, rather than an ordinary
+protocol failure, given a commit message a bare word can't hold, e.g. one
+containing a space).
 
 ## Installation
 
