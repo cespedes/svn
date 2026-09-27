@@ -102,18 +102,35 @@ func (s *Server) UpdateEdit(path, target string, fromRev, toRev uint) ([]Item, e
 // SwitchEdit builds the Editor Command Set sequence to switch a client
 // already at fromPath (at fromRev, see [IsSingleRevisionUpdate]) to
 // toPath (at toRev), for a "switch" command (see [Server.Switch]). It is
-// otherwise identical to [Server.UpdateEdit] -- indeed UpdateEdit is just
+// otherwise similar to [Server.UpdateEdit] -- indeed UpdateEdit is just
 // SwitchEdit called with the same path on both sides -- except that
 // fromPath and toPath may name two entirely different repository
 // locations (e.g. "trunk" and "branches/foo"), corresponding to each
 // other purely structurally (by name, at each level) rather than by any
-// shared history: a file present under both is compared by content/
-// revision exactly as UpdateEdit already does, a file or directory only
-// under toPath is added, and one only under fromPath is deleted, with no
-// attempt to detect a rename or otherwise use copy ancestry. target has
-// the same meaning as UpdateEdit's own (see its doc comment), navigating
-// down from both fromPath and toPath in parallel by the same segment
-// names.
+// shared history: a file present under both is compared by name, a file
+// or directory only under toPath is added, and one only under fromPath
+// is deleted, with no attempt to detect a rename or otherwise use copy
+// ancestry.
+//
+// Unlike UpdateEdit, a file present on both sides is never skipped as
+// "unchanged": UpdateEdit can safely treat a matching CreatedRev as
+// conclusive proof of no change, since it's the very same path at two
+// revisions, but two files at different paths can share a CreatedRev by
+// pure coincidence (e.g. both were added in the same commit) despite
+// having entirely unrelated content -- reported as a real bug, since an
+// earlier version of this code used CreatedRev the same way UpdateEdit
+// does regardless of path, which could send a client switching to a
+// coincidentally same-CreatedRev file its old (fromPath) content instead
+// of the new one (see TestSwitchEditDoesNotSkipSameCreatedRev). So
+// SwitchEdit always resends a file's full content, at the cost of
+// occasionally resending one that happens to be genuinely identical on
+// both sides -- a real inefficiency, but never wrong, in the same spirit
+// as UpdateEdit's own accepted inefficiency of always revisiting an
+// unchanged directory (see its own doc comment).
+//
+// target has the same meaning as UpdateEdit's own (see its doc comment),
+// navigating down from both fromPath and toPath in parallel by the same
+// segment names.
 func (s *Server) SwitchEdit(fromPath, toPath, target string, fromRev, toRev uint) ([]Item, error) {
 	return s.diffEdit(fromPath, toPath, target, fromRev, toRev)
 }
@@ -321,9 +338,14 @@ func (s *Server) updateChildren(e *EditorWriter, fromDirPath, toDirPath, wirePat
 				if err := s.checkoutAddFile(e, childToDirPath, childWirePath, to, toRev); err != nil {
 					return err
 				}
-			case to.CreatedRev == from.CreatedRev:
+			case childFromDirPath == childToDirPath && to.CreatedRev == from.CreatedRev:
 				// Unchanged: a real svnserve skips it entirely, never
-				// even opening it.
+				// even opening it. CreatedRev alone only means that for
+				// the same path at two revisions (UpdateEdit): the same
+				// blob at two different paths (SwitchEdit) can easily
+				// share a CreatedRev by coincidence (e.g. both were
+				// added in the same commit) despite having unrelated,
+				// possibly quite different content.
 			default:
 				if err := s.updateOpenFile(e, childToDirPath, childWirePath, to, fromRev, toRev); err != nil {
 					return err
@@ -384,8 +406,8 @@ func (s *Server) updateNavigateToTarget(e *EditorWriter, fromDirPath, toDirPath,
 		switch {
 		case isNew:
 			return s.checkoutAddFile(e, childToDirPath, name, to, toRev)
-		case to.CreatedRev == from.CreatedRev:
-			return nil // unchanged: skip it entirely, like updateChildren does
+		case childFromDirPath == childToDirPath && to.CreatedRev == from.CreatedRev:
+			return nil // unchanged: skip it entirely, like updateChildren does (see its own comment on this condition)
 		default:
 			return s.updateOpenFile(e, childToDirPath, name, to, fromRev, toRev)
 		}

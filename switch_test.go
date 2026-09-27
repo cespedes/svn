@@ -19,17 +19,22 @@ type switchFakeNode struct {
 //
 //	trunk/a.txt          (modified on branch)
 //	trunk/onlytrunk.txt  (missing on branch: deleted by the switch)
+//	trunk/samerev.txt    (different content, but coincidentally the same
+//	                      CreatedRev as branch/samerev.txt -- see below)
 //	branch/a.txt         (trunk's counterpart, different content/rev)
 //	branch/onlybranch.txt (missing on trunk: added by the switch)
+//	branch/samerev.txt   (trunk's counterpart, same CreatedRev, different content)
 func switchFakeTree() map[string]switchFakeNode {
 	return map[string]switchFakeNode{
 		"":                      {kind: "dir", rev: 1},
 		"trunk":                 {kind: "dir", rev: 1},
 		"trunk/a.txt":           {kind: "file", rev: 1, content: "hello\n"},
 		"trunk/onlytrunk.txt":   {kind: "file", rev: 1, content: "only in trunk\n"},
+		"trunk/samerev.txt":     {kind: "file", rev: 3, content: "trunk version\n"},
 		"branch":                {kind: "dir", rev: 1},
 		"branch/a.txt":          {kind: "file", rev: 2, content: "hello from branch\n"},
 		"branch/onlybranch.txt": {kind: "file", rev: 1, content: "only in branch\n"},
+		"branch/samerev.txt":    {kind: "file", rev: 3, content: "branch version\n"},
 	}
 }
 
@@ -140,4 +145,50 @@ func TestSwitchEditTreeShape(t *testing.T) {
 	}
 	checkContent(aTxt, "hello from branch\n")
 	checkContent(onlyBranch, "only in branch\n")
+}
+
+// TestSwitchEditDoesNotSkipSameCreatedRev checks that SwitchEdit never
+// treats a file as unchanged just because it shares a CreatedRev with
+// its counterpart on the other side: unlike UpdateEdit (where a matching
+// CreatedRev is conclusive proof of no change, since it's the very same
+// path at two revisions), two files at different paths can share a
+// CreatedRev by pure coincidence -- e.g. both were added in the same
+// commit -- despite having unrelated content, as switchFakeTree's own
+// "samerev.txt" pair (present under both trunk and branch, same
+// CreatedRev, different content) is built to exercise. Reported as a
+// real bug: an earlier version of updateChildren/updateNavigateToTarget
+// used to skip such a file, sending its old (trunk) content to a client
+// switching to branch instead of the new one.
+func TestSwitchEditDoesNotSkipSameCreatedRev(t *testing.T) {
+	s := newSwitchFakeServer()
+	items, err := s.SwitchEdit("trunk", "branch", "", 1, 2)
+	if err != nil {
+		t.Fatalf("SwitchEdit: %v", err)
+	}
+
+	openFiles := itemsNamed(items, "open-file")
+	sameRev, ok := openFiles["samerev.txt"]
+	if !ok {
+		t.Fatalf("samerev.txt was skipped as unchanged despite having different content on each side (items:\n%s)", itemLines(items))
+	}
+
+	token := sameRev.List[1].List[2].Text
+	var chunk *Item
+	for _, it := range items {
+		if it.Type == ListType && len(it.List) == 2 && it.List[0].Text == "textdelta-chunk" && it.List[1].List[0].Text == token {
+			c := it
+			chunk = &c
+			break
+		}
+	}
+	if chunk == nil {
+		t.Fatalf("no textdelta-chunk found for samerev.txt (token %q)", token)
+	}
+	got, err := decodeSvndiff(nil, []byte(chunk.List[1].List[1].Text))
+	if err != nil {
+		t.Fatalf("decodeSvndiff: %v", err)
+	}
+	if want := "branch version\n"; string(got) != want {
+		t.Errorf("content = %q, want %q", got, want)
+	}
 }

@@ -111,10 +111,21 @@ most of their implementation, factored into an unexported `diffEdit`)
 does the same as `UpdateEdit`, except that its "from" and "to" sides can
 be two entirely different repository locations (e.g. "trunk" and
 "branches/foo") rather than the same path at two revisions: a node
-present under both is still compared by name and diffed exactly like
-`UpdateEdit` does (open/modify if its kind matches, delete-then-add if it
-doesn't), with no attempt to detect a rename or otherwise use copy
-ancestry, since the two sides are walked purely structurally. Its own
+present under both is still compared by name and diffed similarly to how
+`UpdateEdit` does (delete-then-add if its kind doesn't match), with no
+attempt to detect a rename or otherwise use copy ancestry, since the two
+sides are walked purely structurally. It does *not*, however, treat a
+matching `CreatedRev` as proof that a same-kind file is unchanged the way
+`UpdateEdit` does: that's only sound when it's genuinely the same path
+across two revisions, but two files at different paths can share a
+`CreatedRev` by pure coincidence (e.g. both added in the same commit)
+despite having unrelated content -- an earlier version of this code
+reused `UpdateEdit`'s own rule regardless, which could send a client
+switching to such a file its old, `fromPath` content instead of the new
+one (see `TestSwitchEditDoesNotSkipSameCreatedRev` in `switch_test.go`).
+So `SwitchEdit` always resends a same-kind file's full content instead,
+at the cost of occasionally resending one that's genuinely identical on
+both sides. Its own
 `target` parameter works the same way `UpdateEdit`'s does, navigating
 down from both sides in parallel by the same segment names. Confirmed
 end to end against a real `svn switch`, including that a real client
