@@ -28,7 +28,7 @@ These are the commands a client sends to ask the server to do something.
 | `check-path` | ❌ | ✅ | `Server.CheckPath` callback exists and is wired up, but `Client` has no method to send this command |
 | `stat` | ✅ | ✅ | `Client.Stat`; `server.go`'s `"stat"` case. See the README's note on this command's real, twice-nested wire shape |
 | `get-mergeinfo` | ❌ | ❌ | |
-| `update` | ✅ for a plain checkout | ✅ for a checkout or a single-revision update | `Server.Update` callback is invoked with the parsed arguments and has no return value, but the report/editor exchange that follows (`set-path`, ..., `finish-report`) now drives a real, working "svn checkout" or "svn update" (for a working copy that isn't "mixed revision") -- see the Report/Editor Command Set sections below. `Client.Checkout` sends this too, reporting "I have nothing" -- the same shape `IsPlainCheckout` recognizes -- and applying the resulting Editor Command Set sequence; see the Editor Command Set section below for how that parsing side works |
+| `update` | ✅ for a plain checkout or a single-revision update | ✅ for a checkout or a single-revision update | `Server.Update` callback is invoked with the parsed arguments and has no return value, but the report/editor exchange that follows (`set-path`, ..., `finish-report`) now drives a real, working "svn checkout" or "svn update" (for a working copy that isn't "mixed revision") -- see the Report/Editor Command Set sections below. `Client.Checkout`/`Update` send this too: `Checkout` reports "I have nothing" (the same shape `IsPlainCheckout` recognizes), `Update` reports an existing directory as being entirely at one revision (the same shape `IsSingleRevisionUpdate` recognizes); both then apply the resulting Editor Command Set sequence the same way -- see the Editor Command Set section below for how that parsing side works |
 | `switch` | ❌ | ✅ for a single-revision switch | `Server.Switch` callback is invoked with the parsed arguments and has no return value; the report/editor exchange that follows drives the switch via `Server.SwitchEdit`, the same report/editor mechanism `update` uses but diffing two different repository locations (by name, not shared history) instead of two revisions of the same one -- see the Editor Command Set section below. Confirmed by raw wire capture that `switch`'s own param order differs from `diff`'s: `( [rev] target recurse url ? depth send-copyfrom-args ignore-ancestry )`, with `depth`/`send-copyfrom-args`/`ignore-ancestry` all coming after `url`, not interleaved with `recurse`/`ignore-ancestry` the way `diff`'s params are. `Client` has no method to send this command at all |
 | `status` | ❌ | ❌ | note: this is the wire command a real client uses to compute local status, unrelated to this package's own `Server` type name |
 | `diff` | ❌ | ✅ for a single-revision comparison | `Server.Diff` callback is invoked with the parsed arguments and has no return value; the report/editor exchange that follows drives the diff, via the exact same `IsSingleRevisionUpdate`/`UpdateEdit` machinery "update" uses (the accumulated report looks identical either way -- see the Report/Editor Command Set sections below). `Client` has no method to send this command at all |
@@ -52,18 +52,21 @@ These are the commands a client sends to ask the server to do something.
 
 Sent by a client to describe what it already has, driving an `update`,
 `switch`, `status` or `diff`. `svn.Server` only goes as far as accepting
-the ones needed to reach `finish-report`; `svn.Client.Checkout` sends
-`set-path`/`finish-report` too, but only ever the fixed "I have nothing"
-shape a plain checkout always reports -- it has no way to describe a
-real, existing working copy yet (that's what `update`/`diff`/`switch`
-would need on the client side).
+the ones needed to reach `finish-report`; `svn.Client.Checkout`/`Update`
+send `set-path`/`finish-report` too, but only ever one of two fixed
+shapes: `Checkout` always reports "I have nothing" (start-empty), and
+`Update` always reports an existing directory as being entirely at one
+uniform revision -- neither has any way to describe a real,
+per-subtree-mixed-revision working copy, or a `switch`/`diff`'s own
+report (structurally identical to `update`'s, but driven by a different
+Main Command Set command).
 
 | Command | Client | Server | Notes |
 | --- | --- | --- | --- |
-| `set-path` | ✅ for a plain checkout's own fixed report | ⚠️ | `Serve` accumulates every `set-path` call into a `[]ReportedPath`, passed to `FinishReport` once the report ends; `Server.SetPath` itself is optional and purely informational (e.g. logging) -- it does not need to be set for the accumulation to happen. `Client.Checkout` always sends the same single, start-empty, root `set-path` |
+| `set-path` | ✅ for `Checkout`'s/`Update`'s own fixed report shapes | ⚠️ | `Serve` accumulates every `set-path` call into a `[]ReportedPath`, passed to `FinishReport` once the report ends; `Server.SetPath` itself is optional and purely informational (e.g. logging) -- it does not need to be set for the accumulation to happen. `Client.Checkout` always sends a single, start-empty, root `set-path`; `Client.Update` sends the same but with `start-empty` false and the caller's own `fromRev` |
 | `delete-path` | ❌ | ❌ | no case in `server.go`'s switch: replies "Unknown command"; not yet folded into `ReportedPath` accumulation |
 | `link-path` | ❌ | ❌ | same |
-| `finish-report` | ✅ | ✅ for a checkout, or a single-revision update/diff/switch | `Server.FinishReport` callback receives the accumulated `[]ReportedPath`; for the shape `IsPlainCheckout` recognizes, `Server.CheckoutEdit` builds the resulting `[]Item` automatically, and for the shape `IsSingleRevisionUpdate` recognizes (a working copy that isn't "mixed revision"), `Server.UpdateEdit`/`Server.SwitchEdit` do, by diffing the client's revision against the target one, or against a different repository location, respectively (see the Editor Command Set section below) -- this same shape, and so the same `IsSingleRevisionUpdate` call, is what both a "diff" and a "switch" command's report reduce to as well. A mixed-revision report still needs a caller-supplied `EditorWriter` sequence. `Client.Checkout` sends `finish-report` and then reads the resulting Editor Command Set sequence itself (see below), acking `close-edit`/`abort-edit` and reading the response to `finish-report` itself exactly the way a real client does |
+| `finish-report` | ✅ | ✅ for a checkout, or a single-revision update/diff/switch | `Server.FinishReport` callback receives the accumulated `[]ReportedPath`; for the shape `IsPlainCheckout` recognizes, `Server.CheckoutEdit` builds the resulting `[]Item` automatically, and for the shape `IsSingleRevisionUpdate` recognizes (a working copy that isn't "mixed revision"), `Server.UpdateEdit`/`Server.SwitchEdit` do, by diffing the client's revision against the target one, or against a different repository location, respectively (see the Editor Command Set section below) -- this same shape, and so the same `IsSingleRevisionUpdate` call, is what both a "diff" and a "switch" command's report reduce to as well. A mixed-revision report still needs a caller-supplied `EditorWriter` sequence. `Client.Checkout`/`Update` send `finish-report` and then read the resulting Editor Command Set sequence themselves (see below, `driveEditor`), acking `close-edit`/`abort-edit` and reading the response to `finish-report` itself exactly the way a real client does |
 | `abort-report` | ❌ | ❌ | no case in `server.go`'s switch |
 
 ## Editor Command Set
@@ -76,27 +79,45 @@ unproduced by either side (no write support anywhere in this package).
 Generating the server → client direction is what `EditorWriter`
 (`editor.go`) is for -- one typed method per command below, building up
 the `[]Item` a `Server.FinishReport` implementation can return -- while
-*parsing* that same direction is what `Client.Checkout`'s own
-`applyEditor` (`client_checkout.go`) does: for a plain checkout, it reads
-the sequence a real svnserve's own `finish-report` streams back and
-creates files/directories under a destination directory to match, the
+*parsing* that same direction is what `driveEditor` (`client_editor.go`)
+does, shared by `Client.Checkout` (`client_checkout.go`) and
+`Client.Update` (`client_update.go`): it reads the sequence a real
+svnserve's own `finish-report` streams back and calls one field of a
+caller-supplied `Editor` (also `client_editor.go`) per command -- the
 first thing in this package that reads an Editor Command Set at all
-rather than only ever writing one. It keeps no token→node mapping the
-way `EditorWriter` does for the reverse direction: every `add-dir`/
-`add-file`'s own `path` is already the full path from the edit's root
-(see below), so a node's own local destination is derivable from that
-alone, without needing to track parent tokens or a currently-open-node
-stack; `close-dir`/`close-file` need no bookkeeping to match. Properties
-(`change-dir-prop`/`change-file-prop`, including the svn:entry:*
-pseudo-properties a real working copy's own metadata would need) and
-`absent-dir`/`absent-file` are read off the wire but discarded, matching
-`export`'s own simplification -- there is no working-copy metadata
-(a ".svn" directory) for a real `svn update`/`status` to later use.
-`apply-textdelta`'s content is decoded via `decodeSvndiff` (`svndiff.go`
--- promoted out of test-only status for this), passing `nil` as the
-source (a checkout has no local base content to diff against), and
-`close-file`'s optional checksum, if present, is verified against the
-decoded content before writing it out. For the specific case a checkout's report
+rather than only ever writing one. `Editor` is a struct of callback
+fields, one per command below, mirroring `Server`'s own style exactly:
+`driveEditor` itself never touches a filesystem, a database, or anything
+else -- see `Editor`'s own doc comment, and cmd/go-svn's own
+`checkout`/`update` subcommands for a filesystem-backed implementation
+built purely on this API, which is deliberately the *only* place in this
+codebase that decides what "checking out" or "updating" concretely
+means. `driveEditor` keeps no token→node mapping for directories at all:
+every `add-dir`/`open-dir`/`add-file`/`open-file`'s own `path` is already
+the full path from the edit's root (see below), so it's passed straight
+through to `Editor`'s own callbacks; `close-dir` needs no bookkeeping to
+match either. A file's own wire token *is* tracked internally, purely to
+correlate `apply-textdelta`/`textdelta-chunk`/`textdelta-end`/
+`close-file` back to the same path (since those commands only ever carry
+a token, not a path) -- `Editor`'s own callbacks never see a token at
+all, only the path it already resolves to. Properties
+(`change-dir-prop`/`change-file-prop`) and `absent-dir`/`absent-file` are
+parsed and handed to `Editor`'s own matching fields (a nil field simply
+skips the call). `apply-textdelta`'s content is decoded via
+`decodeSvndiff` (`svndiff.go` -- promoted out of test-only status for
+this): `Editor.OpenFile` (called for an already-existing file, only ever
+sent to `Update`, never `Checkout`) must return that file's own current
+content itself, since a real svnserve updating an existing file may
+describe the new content as a genuine incremental delta against it
+rather than a full replacement -- confirmed the hard way (a first
+version always decoded against `nil`, as `add-file`'s own brand-new-file
+case correctly does, which made `TestClientUpdate` fail decoding a real
+svnserve's own delta for a modified file with "source view out of
+range"). `apply-textdelta`'s own optional base checksum, if present, is
+verified automatically against whatever `Editor.OpenFile` returned;
+`close-file`'s optional checksum, if present, is verified automatically
+against the newly decoded content, before `Editor.CloseFile` is ever
+called with it. For the specific case a checkout's report
 always reduces to, `Server.CheckoutEdit` (`checkout.go`) drives
 `EditorWriter` automatically, walking the target revision's tree via
 `List`/`GetFile` and describing every node as newly added. For a real
@@ -166,21 +187,21 @@ returns.
 | Command | Client | Server |
 | --- | --- | --- |
 | `target-rev` | ✅ | ⚠️ `EditorWriter.TargetRev` builds the `Item`; nothing sends it automatically |
-| `open-root` | ⚠️ parsed but a no-op (destDir already exists) | ⚠️ `EditorWriter.OpenRoot` |
-| `delete-entry` | ✅ | ⚠️ `EditorWriter.DeleteEntry` |
-| `add-dir` | ✅ | ⚠️ `EditorWriter.AddDir` |
-| `open-dir` | ✅ (same handling as `add-dir`) | ⚠️ `EditorWriter.OpenDir` |
-| `change-dir-prop` | ⚠️ parsed but discarded (no property/metadata modeling) | ⚠️ `EditorWriter.ChangeDirProp` |
-| `close-dir` | ⚠️ parsed but a no-op (no open-node stack to pop -- see above) | ⚠️ `EditorWriter.CloseDir` |
-| `absent-dir` | ⚠️ parsed but discarded (no local action) | ⚠️ `EditorWriter.AbsentDir` |
-| `add-file` | ✅ | ⚠️ `EditorWriter.AddFile` |
-| `open-file` | ✅ (same handling as `add-file`) | ⚠️ `EditorWriter.OpenFile` |
-| `apply-textdelta` | ✅ | ⚠️ `EditorWriter.ApplyTextdelta` (always a single, sourceless `EncodeSvndiff` window -- no incremental delta against a real base yet) |
-| `textdelta-chunk` | ✅ | ⚠️ emitted by `EditorWriter.ApplyTextdelta`, not its own method |
+| `open-root` | ✅ calls `Editor.OpenRoot` (a no-op if left nil) | ⚠️ `EditorWriter.OpenRoot` |
+| `delete-entry` | ✅ calls `Editor.DeleteEntry` | ⚠️ `EditorWriter.DeleteEntry` |
+| `add-dir` | ✅ calls `Editor.AddDir` | ⚠️ `EditorWriter.AddDir` |
+| `open-dir` | ✅ calls `Editor.OpenDir` | ⚠️ `EditorWriter.OpenDir` |
+| `change-dir-prop` | ✅ calls `Editor.ChangeDirProp` | ⚠️ `EditorWriter.ChangeDirProp` |
+| `close-dir` | ✅ calls `Editor.CloseDir` (needs no open-node stack to pop -- see above) | ⚠️ `EditorWriter.CloseDir` |
+| `absent-dir` | ✅ calls `Editor.AbsentDir` | ⚠️ `EditorWriter.AbsentDir` |
+| `add-file` | ✅ calls `Editor.AddFile` (a brand new file: no base content for a later `apply-textdelta`) | ⚠️ `EditorWriter.AddFile` |
+| `open-file` | ✅ calls `Editor.OpenFile`, whose own return value becomes `decodeSvndiff`'s source | ⚠️ `EditorWriter.OpenFile` |
+| `apply-textdelta` | ✅ calls `Editor.ApplyTextdelta`; verifies the optional base checksum against `Editor.OpenFile`'s own returned content first | ⚠️ `EditorWriter.ApplyTextdelta` (always a single, sourceless `EncodeSvndiff` window -- no incremental delta against a real base yet) |
+| `textdelta-chunk` | ✅ (no matching `Editor` field: accumulated internally, decoded and handed to `Editor.CloseFile` as `close-file`'s own `content`) | ⚠️ emitted by `EditorWriter.ApplyTextdelta`, not its own method |
 | `textdelta-end` | ⚠️ parsed but a no-op (decoding happens at `close-file` instead) | ⚠️ same |
-| `change-file-prop` | ⚠️ parsed but discarded (no property/metadata modeling) | ⚠️ `EditorWriter.ChangeFileProp` |
-| `close-file` | ✅ | ⚠️ `EditorWriter.CloseFile` |
-| `absent-file` | ⚠️ parsed but discarded (no local action) | ⚠️ `EditorWriter.AbsentFile` |
+| `change-file-prop` | ✅ calls `Editor.ChangeFileProp` | ⚠️ `EditorWriter.ChangeFileProp` |
+| `close-file` | ✅ calls `Editor.CloseFile` with the fully decoded content; verifies the optional checksum against it first | ⚠️ `EditorWriter.CloseFile` |
+| `absent-file` | ✅ calls `Editor.AbsentFile` | ⚠️ `EditorWriter.AbsentFile` |
 | `close-edit` | ✅ acks it and reads `finish-report`'s own final response, exactly like a real client | ⚠️ always sent automatically at the end of a successful `finish-report`, and its client ack read, before `Serve` answers `finish-report` itself; the command itself is never parsed |
 | `abort-edit` | ✅ acked the same way as `close-edit`, reporting the checkout as aborted | ⚠️ same, if a `finish-report` callback errors instead: sent automatically, its client ack read (a real client sends one either way -- confirmed the hard way), before answering `finish-report`; never parsed |
 | `finish-replay` | ❌ | ❌ |

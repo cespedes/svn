@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -159,4 +160,82 @@ func TestExport(t *testing.T) {
 			t.Errorf("trunk/main.go = %q, want %q", got, "package main\n")
 		}
 	})
+}
+
+// TestCheckoutAndUpdate checks "go-svn checkout"/"go-svn update" against
+// a real svnserve: unlike "export" (a one-shot recursive List/GetFile
+// walk), these drive a real report/editor exchange via
+// svn.Client.Checkout/Update, with diskEditor as the only thing deciding
+// that the result lands on the local filesystem -- see svn.Editor's own
+// doc comment. "update" also exercises checkoutInfoFile, the sidecar
+// this command uses in place of a real ".svn" working copy database to
+// remember which URL/revision a directory was checked out at.
+func TestCheckoutAndUpdate(t *testing.T) {
+	requireRealSVNTools(t)
+
+	repoPath := filepath.Join(t.TempDir(), "repo")
+	if out, err := exec.Command("svnadmin", "create", repoPath).CombinedOutput(); err != nil {
+		t.Fatalf("svnadmin create: %v\n%s", err, out)
+	}
+	repoURL := "file://" + repoPath
+
+	wc := t.TempDir()
+	svnCmd := func(args ...string) {
+		t.Helper()
+		args = append([]string{"--non-interactive"}, args...)
+		cmd := exec.Command("svn", args...)
+		cmd.Dir = wc
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("svn %v: %v\n%s", args, err, out)
+		}
+	}
+	write := func(name, content string) {
+		t.Helper()
+		p := filepath.Join(wc, name)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	svnCmd("checkout", "-q", repoURL, ".")
+	write("trunk/main.go", "package main\n")
+	svnCmd("add", "-q", "trunk")
+	svnCmd("commit", "-q", "-m", "initial commit")
+
+	dest := filepath.Join(t.TempDir(), "co")
+	var out bytes.Buffer
+	if err := run([]string{"go-svn", "checkout", repoURL, dest}, &out); err != nil {
+		t.Fatalf("checkout: %v\noutput:\n%s", err, out.String())
+	}
+	if !strings.Contains(out.String(), "Checked out revision 1.") {
+		t.Errorf("checkout output missing revision summary:\n%s", out.String())
+	}
+	if got := readFile(t, filepath.Join(dest, "trunk", "main.go")); got != "package main\n" {
+		t.Errorf("trunk/main.go = %q, want %q", got, "package main\n")
+	}
+	if _, err := os.Stat(filepath.Join(dest, ".svn")); err == nil {
+		t.Errorf("checkout left a .svn directory behind")
+	}
+
+	write("trunk/main.go", "package main\n\nfunc main() {}\n")
+	write("trunk/newfile.go", "package main\n")
+	svnCmd("add", "-q", "trunk/newfile.go")
+	svnCmd("commit", "-q", "-m", "v2")
+
+	out.Reset()
+	if err := run([]string{"go-svn", "update", dest}, &out); err != nil {
+		t.Fatalf("update: %v\noutput:\n%s", err, out.String())
+	}
+	if !strings.Contains(out.String(), "Updated to revision 2.") {
+		t.Errorf("update output missing revision summary:\n%s", out.String())
+	}
+	if got := readFile(t, filepath.Join(dest, "trunk", "main.go")); got != "package main\n\nfunc main() {}\n" {
+		t.Errorf("trunk/main.go = %q, want %q (r2's own content)", got, "package main\n\nfunc main() {}\n")
+	}
+	if got := readFile(t, filepath.Join(dest, "trunk", "newfile.go")); got != "package main\n" {
+		t.Errorf("trunk/newfile.go = %q, want %q", got, "package main\n")
+	}
 }

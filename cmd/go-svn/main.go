@@ -106,6 +106,29 @@ func run(args []string, stdout io.Writer) error {
 			dest = args[2]
 		}
 		return svnExport(args[1], lrev1, dest, stdout)
+	case "checkout":
+		if len(args) > 3 {
+			return errors.New("subcommand 'checkout' takes a repo URL and, optionally, a local directory")
+		}
+		if lrev2 != nil {
+			return errors.New("subcommand 'checkout' does not accept revision range")
+		}
+		dest := ""
+		if len(args) == 3 {
+			dest = args[2]
+		}
+		return svnCheckout(args[1], lrev1, dest, stdout)
+	case "update":
+		if len(args) != 2 {
+			return errors.New("subcommand 'update' takes exactly one argument (a local directory 'checkout' produced)")
+		}
+		if verbose {
+			return errors.New("subcommand 'update' does not accept option '-v'")
+		}
+		if lrev2 != nil {
+			return errors.New("subcommand 'update' does not accept revision range")
+		}
+		return svnUpdate(args[1], lrev1, stdout)
 	default:
 		return fmt.Errorf(`unknown subcommand: '%s'
 Type 'svn help' for usage`, args[0])
@@ -335,6 +358,195 @@ func svnExport(repo string, lrev *int, dest string, stdout io.Writer) error {
 	return nil
 }
 
+// checkoutInfoFile is the name of a small sidecar file "checkout"/
+// "update" use to remember which repository URL and revision a plain,
+// unversioned local directory (see diskEditor) was last brought to --
+// nothing like a real ".svn" working copy database, just enough for a
+// later "go-svn update <localdir>" to know what to ask for without
+// requiring the URL again. This is entirely a go-svn implementation
+// detail: the svn package itself has no notion of a working copy, or of
+// a filesystem, at all -- see svn.Editor's own doc comment.
+const checkoutInfoFile = ".go-svn-checkout"
+
+// checkoutInfo is checkoutInfoFile's own parsed content.
+type checkoutInfo struct {
+	URL string
+	Rev int
+}
+
+// readCheckoutInfo reads dir's own checkoutInfoFile, written by an
+// earlier "checkout" or "update" of it.
+func readCheckoutInfo(dir string) (checkoutInfo, error) {
+	data, err := os.ReadFile(filepath.Join(dir, checkoutInfoFile))
+	if err != nil {
+		return checkoutInfo{}, fmt.Errorf("update: %s: %w (was it checked out with 'go-svn checkout'?)", dir, err)
+	}
+	lines := strings.SplitN(strings.TrimRight(string(data), "\n"), "\n", 2)
+	if len(lines) != 2 {
+		return checkoutInfo{}, fmt.Errorf("update: %s: malformed checkout info", filepath.Join(dir, checkoutInfoFile))
+	}
+	rev, err := strconv.Atoi(lines[1])
+	if err != nil {
+		return checkoutInfo{}, fmt.Errorf("update: %s: malformed checkout info: %w", filepath.Join(dir, checkoutInfoFile), err)
+	}
+	return checkoutInfo{URL: lines[0], Rev: rev}, nil
+}
+
+// writeCheckoutInfo writes dir's own checkoutInfoFile.
+func writeCheckoutInfo(dir string, info checkoutInfo) error {
+	data := fmt.Sprintf("%s\n%d\n", info.URL, info.Rev)
+	if err := os.WriteFile(filepath.Join(dir, checkoutInfoFile), []byte(data), 0o644); err != nil {
+		return fmt.Errorf("writing checkout info: %w", err)
+	}
+	return nil
+}
+
+// svnCheckout checks out repo at lrev (nil meaning the latest revision)
+// into dest (the last path segment of repo's own URL if empty, matching
+// a real "svn checkout") by driving svn.Client.Checkout -- the real
+// report/editor exchange, unlike svnExport's own recursive List/GetFile
+// walk -- with a diskEditor writing every node into dest. Remembers
+// repo's own URL and the checked-out revision in dest's own
+// checkoutInfoFile, so a later "go-svn update dest" knows what to ask
+// for.
+func svnCheckout(repo string, lrev *int, dest string, stdout io.Writer) error {
+	c, err := svn.Connect(repo)
+	if err != nil {
+		return err
+	}
+
+	if dest == "" {
+		dest, err = defaultExportDest(repo)
+		if err != nil {
+			return err
+		}
+	}
+	if err := os.Mkdir(dest, 0o755); err != nil {
+		return fmt.Errorf("checkout: %w", err)
+	}
+
+	rev, err := c.Checkout(lrev, diskEditor(dest, stdout))
+	if err != nil {
+		return err
+	}
+	if err := writeCheckoutInfo(dest, checkoutInfo{URL: repo, Rev: rev}); err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "Checked out revision %d.\n", rev)
+	return nil
+}
+
+// svnUpdate brings dest (an existing directory an earlier "go-svn
+// checkout" produced) up to lrev (nil meaning the latest revision), by
+// driving svn.Client.Update against the same repository URL dest's own
+// checkoutInfoFile recorded, with a diskEditor applying whatever changed
+// directly onto dest. Updates checkoutInfoFile to the new revision
+// afterwards.
+func svnUpdate(dest string, lrev *int, stdout io.Writer) error {
+	info, err := readCheckoutInfo(dest)
+	if err != nil {
+		return err
+	}
+
+	c, err := svn.Connect(info.URL)
+	if err != nil {
+		return err
+	}
+
+	rev, err := c.Update(info.Rev, lrev, diskEditor(dest, stdout))
+	if err != nil {
+		return err
+	}
+	if err := writeCheckoutInfo(dest, checkoutInfo{URL: info.URL, Rev: rev}); err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "Updated to revision %d.\n", rev)
+	return nil
+}
+
+// diskEditor returns an svn.Editor that creates, modifies and removes
+// real files/directories under dest to match whatever
+// svn.Client.Checkout/Update describes, printing one status line per
+// file touched ("A" added, "U" updated, "D" removed), the same letters a
+// real "svn checkout"/"svn update" prints. This -- not anything in the
+// svn package itself -- is what decides that "checking out" or
+// "updating" means writing to the local filesystem; see svn.Editor's own
+// doc comment for why that decision belongs here, in the command-line
+// tool, rather than in the library.
+func diskEditor(dest string, stdout io.Writer) svn.Editor {
+	// added tracks, by path, a file most recently described via AddFile
+	// rather than OpenFile -- purely so CloseFile below can print "A"
+	// instead of "U" for it, matching a real client's own output.
+	added := map[string]bool{}
+	local := func(wirePath string) (string, error) {
+		for _, seg := range strings.Split(wirePath, "/") {
+			if seg == "" || seg == "." || seg == ".." {
+				return "", fmt.Errorf("checkout: unsafe path %q in editor command", wirePath)
+			}
+		}
+		return filepath.Join(dest, filepath.FromSlash(wirePath)), nil
+	}
+
+	return svn.Editor{
+		AddDir: func(path string, copyFrom *svn.EditorCopyFrom) error {
+			p, err := local(path)
+			if err != nil {
+				return err
+			}
+			if err := os.MkdirAll(p, 0o755); err != nil {
+				return err
+			}
+			fmt.Fprintf(stdout, "A    %s\n", p)
+			return nil
+		},
+		OpenDir: func(path string, rev int) error {
+			p, err := local(path)
+			if err != nil {
+				return err
+			}
+			return os.MkdirAll(p, 0o755)
+		},
+		DeleteEntry: func(path string, rev *int) error {
+			p, err := local(path)
+			if err != nil {
+				return err
+			}
+			if err := os.RemoveAll(p); err != nil {
+				return err
+			}
+			fmt.Fprintf(stdout, "D    %s\n", p)
+			return nil
+		},
+		AddFile: func(path string, copyFrom *svn.EditorCopyFrom) error {
+			added[path] = true
+			return nil
+		},
+		OpenFile: func(path string, rev int) ([]byte, error) {
+			p, err := local(path)
+			if err != nil {
+				return nil, err
+			}
+			return os.ReadFile(p)
+		},
+		CloseFile: func(path string, content []byte) error {
+			p, err := local(path)
+			if err != nil {
+				return err
+			}
+			if err := os.WriteFile(p, content, 0o644); err != nil {
+				return err
+			}
+			letter := "U"
+			if added[path] {
+				letter = "A"
+				delete(added, path)
+			}
+			fmt.Fprintf(stdout, "%s    %s\n", letter, p)
+			return nil
+		},
+	}
+}
+
 // defaultExportDest derives the local directory name "svn export" uses
 // when no destination is given explicitly: the last path segment of
 // repo's own URL.
@@ -444,6 +656,8 @@ Available subcommands:
    ls
    log
    export <repo> [localdir]
+   checkout <repo> [localdir]
+   update <localdir>
 
 go-svn is a client for the Subversion protocol.`)
 }

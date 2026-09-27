@@ -268,6 +268,35 @@ func TestClientAgainstRealSVNServer(t *testing.T) {
 	})
 }
 
+// newDiskEditor returns an svn.Editor that writes every node it's told
+// about as a real file/directory under destDir, exactly the kind of
+// filesystem-backed implementation svn.Editor's own doc comment says
+// belongs outside the library itself (see cmd/go-svn's own "checkout"/
+// "update" subcommands for the real thing) -- built here, minimally, only
+// to exercise Client.Checkout/Update's own wire behavior end to end
+// against a real svnserve.
+func newDiskEditor(t *testing.T, destDir string) svn.Editor {
+	t.Helper()
+	local := func(p string) string { return filepath.Join(destDir, filepath.FromSlash(p)) }
+	return svn.Editor{
+		AddDir: func(path string, copyFrom *svn.EditorCopyFrom) error {
+			return os.MkdirAll(local(path), 0o755)
+		},
+		OpenDir: func(path string, rev int) error {
+			return os.MkdirAll(local(path), 0o755)
+		},
+		DeleteEntry: func(path string, rev *int) error {
+			return os.RemoveAll(local(path))
+		},
+		OpenFile: func(path string, rev int) ([]byte, error) {
+			return os.ReadFile(local(path))
+		},
+		CloseFile: func(path string, content []byte) error {
+			return os.WriteFile(local(path), content, 0o644)
+		},
+	}
+}
+
 // TestClientCheckout drives Client.Checkout against a real svnserve,
 // which is what actually exercises the report/editor exchange it sends
 // and the Editor Command Set sequence it then parses -- neither of which
@@ -283,7 +312,10 @@ func TestClientCheckout(t *testing.T) {
 
 	t.Run("plain checkout at the latest revision", func(t *testing.T) {
 		dir := filepath.Join(t.TempDir(), "wc")
-		rev, err := c.Checkout(nil, dir)
+		if err := os.Mkdir(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		rev, err := c.Checkout(nil, newDiskEditor(t, dir))
 		if err != nil {
 			t.Fatalf("Checkout: %v", err)
 		}
@@ -323,8 +355,11 @@ func TestClientCheckout(t *testing.T) {
 
 	t.Run("checkout at an older revision", func(t *testing.T) {
 		dir := filepath.Join(t.TempDir(), "wc")
+		if err := os.Mkdir(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
 		rev1 := 1
-		rev, err := c.Checkout(&rev1, dir)
+		rev, err := c.Checkout(&rev1, newDiskEditor(t, dir))
 		if err != nil {
 			t.Fatalf("Checkout: %v", err)
 		}
@@ -355,7 +390,10 @@ func TestClientCheckout(t *testing.T) {
 			t.Fatalf("Connect: %v", err)
 		}
 		dir := filepath.Join(t.TempDir(), "wc")
-		rev, err := c2.Checkout(nil, dir)
+		if err := os.Mkdir(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		rev, err := c2.Checkout(nil, newDiskEditor(t, dir))
 		if err != nil {
 			t.Fatalf("Checkout: %v", err)
 		}
@@ -379,6 +417,135 @@ func TestClientCheckout(t *testing.T) {
 		// this would fail (or hang).
 		if _, err := c.GetLatestRev(); err != nil {
 			t.Fatalf("GetLatestRev after Checkout: %v", err)
+		}
+	})
+}
+
+// TestClientUpdate drives Client.Update against a real svnserve, checking
+// out at r1 first (via Client.Checkout) and then updating in place --
+// exercising every case newRealRepo's own r1-to-r3 history has: an
+// unmodified file (trunk/main.go, trunk/sub/nested.txt), a modified one
+// (README.md, changed again in r2), and a new one (trunk/main_copy.go,
+// added in r3). A real svnserve serving an update (unlike this package's
+// own Server) may send a modified file's content as a real incremental
+// delta against the client's own reported base rather than a full
+// replacement, which is what actually exercises applyEditor's "open-file"
+// handling (reading the current on-disk content as decodeSvndiff's own
+// source) rather than just its "add-file" one, already covered by
+// TestClientCheckout.
+func TestClientUpdate(t *testing.T) {
+	repoURL := newRealRepo(t)
+	c, err := svn.Connect(repoURL)
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+
+	t.Run("update from r1 to the latest revision", func(t *testing.T) {
+		dir := filepath.Join(t.TempDir(), "wc")
+		if err := os.Mkdir(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		editor := newDiskEditor(t, dir)
+		one := 1
+		if _, err := c.Checkout(&one, editor); err != nil {
+			t.Fatalf("Checkout: %v", err)
+		}
+
+		rev, err := c.Update(1, nil, editor)
+		if err != nil {
+			t.Fatalf("Update: %v", err)
+		}
+		if rev != 3 {
+			t.Errorf("Update() rev = %d, want 3", rev)
+		}
+
+		readme, err := os.ReadFile(filepath.Join(dir, "README.md"))
+		if err != nil {
+			t.Fatalf("reading README.md: %v", err)
+		}
+		if string(readme) != "hello world, v2\n" {
+			t.Errorf("README.md = %q, want %q (r2's own content)", readme, "hello world, v2\n")
+		}
+		mainGo, err := os.ReadFile(filepath.Join(dir, "trunk", "main.go"))
+		if err != nil {
+			t.Fatalf("reading trunk/main.go: %v", err)
+		}
+		if string(mainGo) != "package main\n" {
+			t.Errorf("trunk/main.go = %q, want %q (unchanged since r1)", mainGo, "package main\n")
+		}
+		nested, err := os.ReadFile(filepath.Join(dir, "trunk", "sub", "nested.txt"))
+		if err != nil {
+			t.Fatalf("reading trunk/sub/nested.txt: %v", err)
+		}
+		if string(nested) != "nested\n" {
+			t.Errorf("trunk/sub/nested.txt = %q, want %q (unchanged since r1)", nested, "nested\n")
+		}
+		mainCopy, err := os.ReadFile(filepath.Join(dir, "trunk", "main_copy.go"))
+		if err != nil {
+			t.Fatalf("reading trunk/main_copy.go (added in r3): %v", err)
+		}
+		if string(mainCopy) != "package main\n" {
+			t.Errorf("trunk/main_copy.go = %q, want %q", mainCopy, "package main\n")
+		}
+	})
+
+	t.Run("update from r1 to r2 only", func(t *testing.T) {
+		dir := filepath.Join(t.TempDir(), "wc")
+		if err := os.Mkdir(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		editor := newDiskEditor(t, dir)
+		one := 1
+		if _, err := c.Checkout(&one, editor); err != nil {
+			t.Fatalf("Checkout: %v", err)
+		}
+
+		two := 2
+		rev, err := c.Update(1, &two, editor)
+		if err != nil {
+			t.Fatalf("Update: %v", err)
+		}
+		if rev != 2 {
+			t.Errorf("Update() rev = %d, want 2", rev)
+		}
+
+		readme, err := os.ReadFile(filepath.Join(dir, "README.md"))
+		if err != nil {
+			t.Fatalf("reading README.md: %v", err)
+		}
+		if string(readme) != "hello world, v2\n" {
+			t.Errorf("README.md = %q, want %q", readme, "hello world, v2\n")
+		}
+		// trunk/main_copy.go was only added in r3: it must not exist yet
+		// after an update to r2.
+		if _, err := os.Stat(filepath.Join(dir, "trunk", "main_copy.go")); err == nil {
+			t.Errorf("trunk/main_copy.go should not exist after an update to r2")
+		}
+	})
+
+	t.Run("no-op update already at the latest revision", func(t *testing.T) {
+		dir := filepath.Join(t.TempDir(), "wc")
+		if err := os.Mkdir(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		editor := newDiskEditor(t, dir)
+		if _, err := c.Checkout(nil, editor); err != nil {
+			t.Fatalf("Checkout: %v", err)
+		}
+		rev, err := c.Update(3, nil, editor)
+		if err != nil {
+			t.Fatalf("Update: %v", err)
+		}
+		if rev != 3 {
+			t.Errorf("Update() rev = %d, want 3", rev)
+		}
+	})
+
+	t.Run("Update after other commands on the same connection", func(t *testing.T) {
+		// If an earlier subtest's Update left the connection desynced,
+		// this would fail (or hang).
+		if _, err := c.GetLatestRev(); err != nil {
+			t.Fatalf("GetLatestRev after Update: %v", err)
 		}
 	})
 }
