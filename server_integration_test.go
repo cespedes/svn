@@ -7,6 +7,7 @@ package svn_test
 
 import (
 	"fmt"
+	"io"
 	"io/fs"
 	"net"
 	"net/url"
@@ -14,6 +15,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/cespedes/svn"
@@ -778,4 +780,298 @@ func TestServerAgainstRealSVNClient(t *testing.T) {
 			t.Errorf("expected a \"non-existent\" error, got:\n%s", out)
 		}
 	})
+}
+
+// fakeCommitNode/fakeCommitTree back a small, genuinely mutable
+// repository -- unlike fakeTreeAt/newFakeServer's own fixed, pure-
+// function snapshots (shared by every subtest in
+// TestServerAgainstRealSVNClient above, and so deliberately left
+// untouched here), a real commit needs somewhere to actually write to.
+// Guarded by a mutex since startFakeCommitServer accepts connections
+// concurrently.
+type fakeCommitNode struct {
+	kind    string // "file" or "dir"
+	content string
+	rev     int
+}
+
+type fakeCommitTree struct {
+	mu        sync.Mutex
+	nodes     map[string]fakeCommitNode
+	latestRev int
+}
+
+func newFakeCommitTree() *fakeCommitTree {
+	return &fakeCommitTree{
+		nodes: map[string]fakeCommitNode{
+			"":          {kind: "dir", rev: 1},
+			"README.md": {kind: "file", content: "hello world\n", rev: 1},
+		},
+		latestRev: 1,
+	}
+}
+
+// startFakeCommitServer runs a Server backed by tree on a TCP listener,
+// the same way startFakeServer does, but read/write instead of
+// read-only, and with no session-anchoring complexity at all (every
+// subtest here connects at the repository root) since that isn't what
+// this test is about.
+func startFakeCommitServer(t *testing.T, tree *fakeCommitTree) string {
+	t.Helper()
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen: %v", err)
+	}
+	t.Cleanup(func() { ln.Close() })
+
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return // listener closed: test is done
+			}
+			go func() {
+				defer conn.Close()
+
+				var sessionBase string
+				// resolve turns a session-anchor-relative path (as every
+				// Stat/List/GetFile callback argument is) into a
+				// repository-root-relative tree key -- the same pattern
+				// newFakeServer above uses, needed here too since e.g. a
+				// real "svn cat URL/README.md" anchors its own session
+				// directly at "README.md" and then queries "" for it,
+				// not "README.md" again.
+				resolve := func(path string) string {
+					switch {
+					case sessionBase == "":
+						return path
+					case path == "":
+						return sessionBase
+					default:
+						return sessionBase + "/" + path
+					}
+				}
+
+				server := &svn.Server{}
+				server.Greet = func(version int, capabilities []string, connectURL string, raclient string, client *string) (svn.ReposInfo, error) {
+					u, err := url.Parse(connectURL)
+					if err != nil {
+						return svn.ReposInfo{}, err
+					}
+					sessionBase = strings.Trim(u.Path, "/")
+					root := *u
+					root.Path = "/"
+					return svn.ReposInfo{
+						UUID: "9d3c8b6e-c0mm-1t00-0000-000000000000",
+						URL:  root.String(),
+					}, nil
+				}
+				server.GetLatestRev = func() (int, error) {
+					tree.mu.Lock()
+					defer tree.mu.Unlock()
+					return tree.latestRev, nil
+				}
+				server.Stat = func(path string, rev *uint) (svn.Dirent, error) {
+					tree.mu.Lock()
+					defer tree.mu.Unlock()
+					n, ok := tree.nodes[resolve(path)]
+					if !ok {
+						return svn.Dirent{}, fs.ErrNotExist
+					}
+					return svn.Dirent{
+						Kind: n.kind, Size: uint64(len(n.content)),
+						CreatedRev: uint(n.rev), CreatedDate: "2024-01-01T00:00:00.000000Z", LastAuthor: "tester",
+					}, nil
+				}
+				server.CheckPath = func(path string, rev *uint) (string, error) {
+					tree.mu.Lock()
+					defer tree.mu.Unlock()
+					n, ok := tree.nodes[resolve(path)]
+					if !ok {
+						return "none", nil
+					}
+					return n.kind, nil
+				}
+				server.List = func(path string, rev *uint, depth string, fields, pattern []string) ([]svn.Dirent, error) {
+					tree.mu.Lock()
+					defer tree.mu.Unlock()
+					full := resolve(path)
+					n, ok := tree.nodes[full]
+					if !ok || n.kind != "dir" {
+						return nil, fs.ErrNotExist
+					}
+					prefix := full
+					if prefix != "" {
+						prefix += "/"
+					}
+					out := []svn.Dirent{{
+						Path: "/" + full, Kind: "dir",
+						CreatedRev: uint(n.rev), CreatedDate: "2024-01-01T00:00:00.000000Z", LastAuthor: "tester",
+					}}
+					for p, e := range tree.nodes {
+						if p == full || !strings.HasPrefix(p, prefix) {
+							continue
+						}
+						rest := strings.TrimPrefix(p, prefix)
+						if rest == "" || strings.Contains(rest, "/") {
+							continue // not a direct child
+						}
+						out = append(out, svn.Dirent{
+							Path: "/" + p, Kind: e.kind, Size: uint64(len(e.content)),
+							CreatedRev: uint(e.rev), CreatedDate: "2024-01-01T00:00:00.000000Z", LastAuthor: "tester",
+						})
+					}
+					return out, nil
+				}
+				server.GetFile = func(path string, rev *uint, wantProps, wantContents bool) (uint, []svn.PropList, []byte, error) {
+					tree.mu.Lock()
+					defer tree.mu.Unlock()
+					n, ok := tree.nodes[resolve(path)]
+					if !ok || n.kind != "file" {
+						return 0, nil, nil, fs.ErrNotExist
+					}
+					if !wantContents {
+						return uint(n.rev), nil, nil, nil
+					}
+					return uint(n.rev), nil, []byte(n.content), nil
+				}
+				server.Update = func(rev *uint, target string, recurse bool) {}
+				server.FinishReport = func(report []svn.ReportedPath) ([]svn.Item, error) {
+					tree.mu.Lock()
+					latest := uint(tree.latestRev)
+					tree.mu.Unlock()
+					if svn.IsPlainCheckout(report) {
+						return server.CheckoutEdit(report[0].Path, latest)
+					}
+					if fromRev, ok := svn.IsSingleRevisionUpdate(report); ok {
+						return server.UpdateEdit(report[0].Path, "", fromRev, latest)
+					}
+					return nil, fmt.Errorf("fake commit server: unsupported report shape: %+v", report)
+				}
+				server.Commit = func(logMessage string, revprops []svn.PropList) (svn.Editor, error) {
+					tree.mu.Lock() // released by FinishCommit, once this same commit ends
+					newRev := tree.latestRev + 1
+					editor := svn.Editor{
+						AddDir: func(path string, copyFrom *svn.EditorCopyFrom) error {
+							tree.nodes[resolve(path)] = fakeCommitNode{kind: "dir", rev: newRev}
+							return nil
+						},
+						OpenDir: func(path string, rev int) error {
+							full := resolve(path)
+							n := tree.nodes[full]
+							n.rev = newRev
+							tree.nodes[full] = n
+							return nil
+						},
+						AddFile: func(path string, copyFrom *svn.EditorCopyFrom) error {
+							tree.nodes[resolve(path)] = fakeCommitNode{kind: "file", rev: newRev}
+							return nil
+						},
+						OpenFile: func(path string, rev int) ([]byte, error) {
+							return []byte(tree.nodes[resolve(path)].content), nil
+						},
+						CloseFile: func(path string, content []byte) error {
+							full := resolve(path)
+							n := tree.nodes[full]
+							n.kind = "file"
+							n.content = string(content)
+							n.rev = newRev
+							tree.nodes[full] = n
+							return nil
+						},
+						DeleteEntry: func(path string, rev *int) error {
+							delete(tree.nodes, resolve(path))
+							return nil
+						},
+					}
+					return editor, nil
+				}
+				server.FinishCommit = func() (svn.CommitInfo, error) {
+					defer tree.mu.Unlock()
+					tree.latestRev = tree.latestRev + 1
+					return svn.CommitInfo{
+						Rev: tree.latestRev, Date: "2024-01-02T00:00:00.000000Z", Author: "tester",
+					}, nil
+				}
+				if err := server.Serve(conn, conn); err != nil && err != io.EOF {
+					fmt.Fprintf(os.Stderr, "fake commit server: Serve: %v\n", err)
+				}
+			}()
+		}
+	}()
+
+	return fmt.Sprintf("svn://%s/", ln.Addr().String())
+}
+
+// TestServerAgainstRealSVNClientCommit checks Server.Commit/FinishCommit
+// against a real "svn commit" -- the one Main Command Set command
+// TestServerAgainstRealSVNClient above never exercises, since every one
+// of its subtests reads a fixed, pure-function tree rather than writing
+// to a genuinely mutable one. Kept as its own, separate test (with its
+// own tree/server helpers) specifically so this doesn't risk disturbing
+// that already-passing suite in any way.
+func TestServerAgainstRealSVNClientCommit(t *testing.T) {
+	requireRealSVNClient(t)
+	tree := newFakeCommitTree()
+	repoURL := startFakeCommitServer(t, tree)
+
+	dir := t.TempDir()
+	if out, err := runSVN(t, "--non-interactive", "checkout", "-q", repoURL, dir); err != nil {
+		t.Fatalf("checkout: %v\n%s", err, out)
+	}
+
+	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("hello world, v2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "newfile.go"), []byte("package main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := runSVN(t, "--non-interactive", "add", "-q", filepath.Join(dir, "newfile.go")); err != nil {
+		t.Fatalf("add: %v\n%s", err, out)
+	}
+	if out, err := runSVN(t, "--non-interactive", "commit", "-q", "-m", "test commit", dir); err != nil {
+		t.Fatalf("commit: %v\n%s", err, out)
+	}
+
+	tree.mu.Lock()
+	gotRev := tree.latestRev
+	tree.mu.Unlock()
+	if gotRev != 2 {
+		t.Errorf("latestRev = %d, want 2", gotRev)
+	}
+
+	if out, err := runSVN(t, "--non-interactive", "cat", repoURL+"README.md"); err != nil {
+		t.Fatalf("cat README.md: %v\n%s", err, out)
+	} else if out != "hello world, v2\n" {
+		t.Errorf("cat README.md = %q, want %q", out, "hello world, v2\n")
+	}
+	if out, err := runSVN(t, "--non-interactive", "cat", repoURL+"newfile.go"); err != nil {
+		t.Fatalf("cat newfile.go: %v\n%s", err, out)
+	} else if out != "package main\n" {
+		t.Errorf("cat newfile.go = %q, want %q", out, "package main\n")
+	}
+
+	// Confirm the working copy itself agrees too, not just a fresh "cat".
+	// "svn info" on the *working copy root* deliberately isn't checked
+	// here for a bumped "Revision:" -- confirmed against a real svnserve
+	// that this field only reflects when the root directory *itself* was
+	// last touched (never, just by adding files inside it), not the
+	// latest revision the working copy as a whole is aware of; a plain
+	// "info" on the modified file itself is what actually reflects the
+	// commit.
+	info, err := runSVN(t, "--non-interactive", "info", filepath.Join(dir, "README.md"))
+	if err != nil {
+		t.Fatalf("info: %v\n%s", err, info)
+	}
+	if !strings.Contains(info, "Last Changed Rev: 2") {
+		t.Errorf("info output missing updated revision:\n%s", info)
+	}
+	status, err := runSVN(t, "--non-interactive", "status", dir)
+	if err != nil {
+		t.Fatalf("status: %v\n%s", err, status)
+	}
+	if strings.TrimSpace(status) != "" {
+		t.Errorf("expected a clean status after commit, got:\n%s", status)
+	}
 }

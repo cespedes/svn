@@ -165,28 +165,33 @@ incremental delta *against that base* rather than a full replacement —
 
 ### Server-side status
 
-A real `svn checkout`, single-revision `svn update`/`svn diff`, and
-single-revision `svn switch` all work end to end against a `svn.Server`
-implementation. `Serve` can now also *receive* a commit driven by this
-package's own `Client`, via `Server.Commit(logMessage string, revprops
-[]PropList) (Editor, error)` (called when `"commit"` arrives, returning
-the `Editor` whose fields `Serve` calls as it parses the client-driven
-Editor Command Set that follows -- reusing `driveEditor` unchanged, in
-the reverse direction from every other use) and `Server.FinishCommit()
-(CommitInfo, error)` (called once the client's own `close-edit` is
-received, to report the new revision back). Two things remain open:
+A real `svn checkout`, single-revision `svn update`/`svn diff`/`svn
+switch`, and now also `svn commit`, all work end to end against a
+`svn.Server` implementation. `Serve` receives a commit via
+`Server.Commit(logMessage string, revprops []PropList) (Editor, error)`
+(called when `"commit"` arrives, returning the `Editor` whose fields
+`Serve` calls as it parses the client-driven Editor Command Set that
+follows -- reusing `driveEditor` unchanged, in the reverse direction
+from every other use) and `Server.FinishCommit() (CommitInfo, error)`
+(called once the client's own `close-edit` is received, to report the
+new revision back). A commit's author identity is left to whatever
+`FinishCommit`'s own implementation closes over (e.g. something `Greet`
+recorded) -- `Server` has no other per-connection "who is this" concept,
+and none was needed to make this work end to end.
 
-- **Author identity.** A real commit's `CommitInfo.Author` comes from
-  the authenticated user, but `Server` today only distinguishes
-  `ANONYMOUS`/`EXTERNAL` at the transport level, with no per-connection
-  "who is this" concept -- left to whatever `FinishCommit`'s own
-  implementation closes over (e.g. something `Greet` recorded).
-- **Validation against a real `svn commit`.** Everything above is
-  confirmed end to end only against this package's own `Client`/
-  `EditorWriter` so far. A real client's own commit may hit the same
-  `ANONYMOUS`-then-`EXTERNAL`-reauth problem `Client.Commit`'s own wire
-  capture did (see "Client: driving and parsing the Editor Command Set"
-  above) -- not yet confirmed either way.
+Validating this against a real `svn commit` (not just this package's own
+`Client`) surfaced one real bug, unrelated to authentication (the
+`ANONYMOUS`-then-`EXTERNAL`-reauth problem `Client.Commit`'s own wire
+capture hit never came up here, since this package's own `Server` never
+gates a command on a stronger auth level the way a real svnserve's
+`auth-access=write` config does): `Serve`'s own greeting advertised the
+`svndiff1`/`accepts-svndiff2` capabilities, which `decodeSvndiff` can't
+actually back up (it only understands the base, uncompressed svndiff0
+format) -- a real client takes this as license to compress its own
+outgoing delta during commit (version byte 2 by default), which then
+failed to decode. Fixed by simply not advertising either capability
+(`client.go`'s own greeting already didn't, for the same reason, in the
+read direction) -- see "Wire-level conventions" below.
 
 ## Wire-level conventions
 
@@ -247,6 +252,21 @@ touch any of these again:
   revision-property value) sent alongside it must be built from raw
   `[]byte`, not a Go `string` field on a struct passed to `Marshal`, for
   the same word-vs-string reason noted above.
+- A server must not advertise the `svndiff1`/`accepts-svndiff2`
+  capabilities unless it can actually decode a compressed (zlib) delta:
+  a real client takes either as license to send one anyway during its
+  own commit (version byte 2 by default), regardless of what version
+  the *server*'s own outgoing deltas use. This package's `decodeSvndiff`
+  only understands the base, uncompressed svndiff0 format, so `Serve`
+  simply doesn't advertise either — `Client`'s own greeting already
+  didn't, for the same reason, in the read direction.
+- A working copy's own root directory's `Revision:`/`Last Changed Rev:`
+  (as `svn info` reports them) reflects only when *that directory
+  itself* was last touched, never the latest revision the working copy
+  as a whole is aware of — adding or modifying files inside it doesn't
+  bump either field for the root. This is real `svn` behavior in
+  general, not specific to this package, but easy to assume otherwise
+  when writing a test's own assertions against a commit's outcome.
 
 ## The `fs.ErrNotExist` convention
 

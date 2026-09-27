@@ -12,17 +12,13 @@ a subset of ra_svn, described in detail below.
 
 ## Protocol coverage
 
-This package implements the **read-only, unversioned-property, non-locking**
-part of ra_svn: browsing and reading a repository at a given revision, plus a
-plain `svn checkout` and a single-revision `svn update`/`svn diff` (all three
-on both sides -- see below) and, `svn.Server`-side only, serving a
-single-revision `svn switch` too. `svn.Client`-side, it also implements
-`commit`, driving the client's own end of the Editor Command Set exchange --
-but only `svn.Client`-side: a `svn.Server` implementation still cannot
-*receive* a commit from a real client. It does not implement a
-mixed-revision `update`/`diff`/`switch` (and so nothing that depends on that
-kind of thing, like `blame`), locking, or revision
-properties. There is
+This package implements the **unversioned-property, non-locking** part of
+ra_svn: browsing and reading a repository at a given revision, a plain
+`svn checkout` and a single-revision `svn update`/`svn diff`/`commit`, and,
+`svn.Server`-side only, serving a single-revision `svn switch` too -- all on
+both sides. It does not implement a mixed-revision `update`/`diff`/`switch`
+(and so nothing that depends on that kind of thing, like `blame`), locking,
+or revision properties. There is
 no support for `svn://`'s raw TCP transport (only `file://` and `svn+ssh://`,
 which both exec `svnserve -t` — see below) or for the HTTP-based (DAV)
 protocol, and the only auth mechanisms implemented are `ANONYMOUS` and
@@ -65,16 +61,17 @@ how the Editor Command Set exchange behind `checkout`/`update`/`diff`/
 | `get-dir` | ✅ | a thin wrapper around `Server.List`; superseded by `list` for a modern client's normal directory browsing, but `svn diff` still falls back to it to enumerate a deleted directory's former contents |
 | `reparent` | ✅ | purely informational, like `set-path`; a real client commonly reparents an existing session (rather than opening a new connection) while preparing a `switch` -- see the next row |
 | `set-path`, `update`, `diff`, `switch`, `finish-report` | ✅ for a checkout or a single-revision update/diff/switch | `IsPlainCheckout`/`Server.CheckoutEdit` handle a plain checkout; `IsSingleRevisionUpdate`/`Server.UpdateEdit`/`Server.SwitchEdit` handle a real `update`/`diff`/`switch` for a working copy that isn't "mixed revision", diffing the client's revision against the target (or a different repository location, for `switch`) and describing only what changed. See [docs/architecture.md](docs/architecture.md) for how this works and its wire-level gotchas |
-| everything else (`delete-path`/`link-path`, most of the editor command set beyond what a checkout/update/diff/switch needs, `commit`, locking, revision properties, `get-mergeinfo`, `get-file-revs`, `replay`, ...) | ❌ | not handled: replies "Unknown command" — see [docs/protocol.md](docs/protocol.md) for the full list |
+| `commit` | ✅ | `Server.Commit`/`Server.FinishCommit` receive a client-driven Editor Command Set via the same `driveEditor` reader used to parse a server-driven one; a commit's own author identity is left to whatever `FinishCommit`'s own implementation closes over, since `Server` has no other per-connection "who is this" concept |
+| everything else (`delete-path`/`link-path`, most of the editor command set beyond what a checkout/update/diff/switch/commit needs, locking, revision properties, `get-mergeinfo`, `get-file-revs`, `replay`, ...) | ❌ | not handled: replies "Unknown command" — see [docs/protocol.md](docs/protocol.md) for the full list |
 
-In practice: a real `svn info`/`ls`/`cat`/`log`/`checkout`/`update`/`diff`/`switch`
-against a `svn.Server` implementation works (confirmed against a real `svn`
-client — see [Development](#development)), as long as the working copy
-isn't "mixed revision"; `svn commit` does not (there is no `Server.Commit`
-or equivalent). In the other direction, `svn.Client.Checkout`/`Update`/
-`Diff`/`Commit` work against a real `svnserve` the same way (confirmed in
-`svn_integration_test.go`). See [docs/architecture.md](docs/architecture.md)
-for the wire-level gotchas this interop testing found along the way.
+In practice: a real `svn info`/`ls`/`cat`/`log`/`checkout`/`update`/`diff`/
+`switch`/`commit` against a `svn.Server` implementation works (confirmed
+against a real `svn` client — see [Development](#development)), as long as
+the working copy isn't "mixed revision". In the other direction,
+`svn.Client.Checkout`/`Update`/`Diff`/`Commit` work against a real `svnserve`
+the same way (confirmed in `svn_integration_test.go`). See
+[docs/architecture.md](docs/architecture.md) for the wire-level gotchas this
+interop testing found along the way.
 
 ## Installation
 

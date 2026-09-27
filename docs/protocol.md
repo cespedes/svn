@@ -25,7 +25,7 @@ These are the commands a client sends to ask the server to do something.
 | `change-rev-prop2` | ❌ | ❌ | |
 | `rev-proplist` | ❌ | ❌ | |
 | `rev-prop` | ❌ | ❌ | |
-| `commit` | ✅ | ❌ | `Client.Commit` sends this and then drives the client's own end of the Editor Command Set (see below); `Server` has no way to receive one -- no case in `server.go`'s switch at all |
+| `commit` | ✅ | ✅ | `Client.Commit` sends this and drives the client's own end of the Editor Command Set; `server.go`'s `"commit"` case (`handleCommit`) does the reverse, via `Server.Commit`/`Server.FinishCommit` -- see [docs/architecture.md](docs/architecture.md) |
 | `get-file` | ✅ | ✅ | `Client.GetFile`; `server.go`'s `"get-file"` case |
 | `get-dir` | ❌ | ✅ | superseded by `list`, which `server.go`'s own directory-listing code uses internally too (this case is a thin wrapper around `Server.List`) -- a modern client generally sends `list` instead, but `svn diff` still falls back to `get-dir` to enumerate a deleted directory's former contents, despite `Server.Serve` always advertising the `list` capability |
 | `check-path` | ❌ | ✅ | `Server.CheckPath` callback exists and is wired up, but `Client` has no method to send this command |

@@ -240,9 +240,17 @@ func (s *Server) Serve(r io.Reader, w io.Writer) error {
 		SvnVersion,
 		[]any{},
 		[]any{
+			// Deliberately not "svndiff1"/"accepts-svndiff2": decodeSvndiff
+			// only understands the base, uncompressed svndiff0 format
+			// (version byte 0); advertising either would tell a real
+			// client it's safe to send a compressed (zlib) delta during
+			// a commit's own apply-textdelta -- confirmed the hard way,
+			// since a real client does exactly that by default (version
+			// byte 2) once these are offered, and Server.Commit then
+			// fails outright with "svndiff: unsupported version 2".
+			// Client.go's own greeting already omits both for the same
+			// reason, in the read direction.
 			"edit-pipeline",
-			"svndiff1",
-			"accepts-svndiff2",
 			"absent-entries",
 			"commit-revprops",
 			"depth",
