@@ -107,6 +107,8 @@ func Connect(address string) (*Client, error) {
 		return nil, fmt.Errorf("svn: connect to %q: scheme %q not implemented", address, u.Scheme)
 	}
 
+	c.conn.debug = DefaultDebug
+
 	connectURL := u.String()
 	c.reconnect = func() error {
 		c.conn.Close()
@@ -141,11 +143,35 @@ func Connect(address string) (*Client, error) {
 // reopen r and w if the connection breaks, so it can't recover from that
 // automatically; see the Client doc comment.
 func NewClient(r io.Reader, w io.Writer, address string) (*Client, error) {
-	c := &Client{conn: conn{r: r, w: w}}
+	c := &Client{conn: conn{r: r, w: w, debug: DefaultDebug}}
 	if err := c.handshake(address); err != nil {
 		return nil, err
 	}
 	return c, nil
+}
+
+// DefaultDebug, if non-nil, is used as the initial debug writer (see
+// [Client.SetDebug]) for every [Client] that [Connect] or [NewClient]
+// creates from then on -- including the handshake each performs
+// internally before returning, which [Client.SetDebug] can never log,
+// since by the time it can be called on the result, that handshake has
+// already happened. Following the same convention as
+// [net/http.DefaultTransport], it's meant to be set once, before any
+// concurrent use of the package begins; setting it while a Connect or
+// NewClient call is already underway elsewhere is a data race.
+var DefaultDebug io.Writer
+
+// SetDebug makes c log every Item it reads from or writes to the
+// connection to w, prefixed with "> " (sent) or "< " (received) -- the
+// same convention e.g. "curl -v" uses for a request/response pair. Pass
+// nil to stop logging. Since [Connect]/[NewClient] already complete the
+// initial greeting/version-negotiation/auth handshake before returning,
+// only traffic from the next call onward is logged; the handshake itself
+// never is -- set [DefaultDebug] beforehand instead to also capture that.
+func (c *Client) SetDebug(w io.Writer) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.conn.debug = w
 }
 
 // handshake performs the greeting, version negotiation, auth and

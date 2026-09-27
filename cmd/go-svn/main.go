@@ -26,17 +26,35 @@ func main() {
 	}
 }
 
-// run dispatches to the subcommand named by args[1], mirroring a real
-// "svn"'s own command-line shape: options like "-r"/"-v" go after the
-// subcommand name (e.g. "go-svn cat -r5 URL"), not before it, and only
-// the subcommands that actually use a given option accept it at all --
-// see parseArgs.
+// run dispatches to the subcommand named by the first non-"-d" argument,
+// mirroring a real "svn"'s own command-line shape: options like "-r"/"-v"
+// go after the subcommand name (e.g. "go-svn cat -r5 URL"), not before
+// it, and only the subcommands that actually use a given option accept
+// it at all -- see parseArgs. "-d" is the one exception: it doesn't
+// change any subcommand's own behavior, only whether every svn.Connect
+// call logs its wire traffic (via svn.DefaultDebug -- set here, once,
+// rather than threaded through every subcommand function, since it
+// covers every Client this process creates from this point on, and
+// Connect's own handshake needs it set before Connect is even called),
+// so it must come *before* the subcommand name instead, the same way it
+// would apply to the whole program rather than to one command --
+// "go-svn -d checkout URL", not "go-svn checkout -d URL".
 func run(args []string, stdout io.Writer) error {
-	if len(args) < 2 {
+	args = args[1:] // drop argv[0]
+	debug := false
+	for len(args) > 0 && args[0] == "-d" {
+		debug = true
+		args = args[1:]
+	}
+	svn.DefaultDebug = nil
+	if debug {
+		svn.DefaultDebug = os.Stderr
+	}
+	if len(args) < 1 {
 		return errors.New("type 'go-svn help' for usage")
 	}
-	cmdName := args[1]
-	rest := args[2:]
+	cmdName := args[0]
+	rest := args[1:]
 
 	if cmdName == "help" {
 		help(stdout)
@@ -1166,11 +1184,15 @@ func exportFile(c *svn.Client, svnPath string, rev *int, destPath string) error 
 }
 
 func help(stdout io.Writer) {
-	fmt.Fprintln(stdout, `usage: go-svn <subcommand> [-r revision[:revision2]] [-v] <repo>
+	fmt.Fprintln(stdout, `usage: go-svn [-d] <subcommand> [-r revision[:revision2]] [-v] <repo>
 
 Options go after the subcommand name and before <repo> (e.g.
 "go-svn cat -r100 URL"), and only the subcommands that use a given
-option accept it at all.
+option accept it at all. "-d" is the one exception: it goes *before*
+the subcommand name instead (e.g. "go-svn -d cat -r100 URL"), since it
+doesn't change any subcommand's own behavior -- it makes the connection
+log every message sent to and received from the server, to standard
+error, prefixed "> "/"< ".
 
 Available subcommands:
    info [-r rev] <repo>

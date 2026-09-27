@@ -21,14 +21,17 @@ go install github.com/cespedes/svn/cmd/go-svn@latest
 ## Usage
 
 ```
-go-svn <subcommand> [-r revision[:revision2]] [-v] <repo>
+go-svn [-d] <subcommand> [-r revision[:revision2]] [-v] <repo>
 ```
 
 Options go *after* the subcommand name, the same way a real `svn`'s own
 command-line works (`go-svn cat -r100 URL`, not `go-svn -r 100 cat URL`),
 and only the subcommands that actually use a given option accept it at all
 -- passing one to a subcommand that doesn't is an error, not silently
-ignored.
+ignored. `-d` is the one exception: it goes *before* the subcommand name
+instead (`go-svn -d cat -r100 URL`), since it isn't specific to any one
+of them -- it makes the connection log every message sent to and
+received from the server, to standard error, prefixed `"> "`/`"< "`.
 
 | Subcommand | Notes |
 | --- | --- |
@@ -73,4 +76,7 @@ go-svn commit -m "fix bug" trunk
 # from inside trunk itself, localdir can be omitted:
 go-svn update
 go-svn commit -m "fix bug"
+
+# show every message exchanged with the server, e.g. to debug a failure:
+go-svn -d info svn+ssh://example.com/repo
 ```

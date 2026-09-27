@@ -7,6 +7,7 @@ package main
 
 import (
 	"bytes"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -83,6 +84,32 @@ func readFile(t *testing.T, path string) string {
 		t.Fatalf("reading %s: %v", path, err)
 	}
 	return string(content)
+}
+
+// captureStderr redirects the process-wide os.Stderr for the duration of
+// fn (restoring it afterward) and returns everything written to it --
+// needed to test "-d", since connect always logs to os.Stderr directly
+// rather than through run's own stdout parameter. Relies on nothing else
+// in this package running concurrently against os.Stderr, true of every
+// test in this file (none call t.Parallel).
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := os.Stderr
+	os.Stderr = w
+	defer func() { os.Stderr = old }()
+
+	fn()
+
+	w.Close()
+	var buf bytes.Buffer
+	if _, err := io.Copy(&buf, r); err != nil {
+		t.Fatal(err)
+	}
+	return buf.String()
 }
 
 // TestExport checks "go-svn export" against a real svnserve: a plain
@@ -244,6 +271,51 @@ func TestCLIOptionOrdering(t *testing.T) {
 		err := run([]string{"go-svn", "cat", "-v", repoURL + "/main.go"}, &out)
 		if err == nil {
 			t.Fatalf("expected an error, got none (output: %s)", out.String())
+		}
+	})
+
+	// Unlike every other option, "-d" doesn't change any subcommand's own
+	// behavior -- it applies to the whole program -- so it must come
+	// *before* the subcommand name instead of after it.
+	t.Run("-d before the subcommand logs wire traffic", func(t *testing.T) {
+		var out bytes.Buffer
+		var runErr error
+		stderr := captureStderr(t, func() {
+			runErr = run([]string{"go-svn", "-d", "info", repoURL}, &out)
+		})
+		if runErr != nil {
+			t.Fatalf("run: %v\noutput:\n%s", runErr, out.String())
+		}
+		if !strings.Contains(stderr, "> (") {
+			t.Errorf("stderr missing sent wire traffic:\n%s", stderr)
+		}
+		if !strings.Contains(stderr, "< (") {
+			t.Errorf("stderr missing received wire traffic:\n%s", stderr)
+		}
+	})
+
+	t.Run("-d after the subcommand is rejected", func(t *testing.T) {
+		var out bytes.Buffer
+		err := run([]string{"go-svn", "info", "-d", repoURL}, &out)
+		if err == nil {
+			t.Fatalf("expected an error, got none (output: %s)", out.String())
+		}
+		if !strings.Contains(err.Error(), "unknown option") {
+			t.Errorf("error = %q, want it to mention an unknown option", err.Error())
+		}
+	})
+
+	t.Run("without -d, nothing is logged to stderr", func(t *testing.T) {
+		var out bytes.Buffer
+		var runErr error
+		stderr := captureStderr(t, func() {
+			runErr = run([]string{"go-svn", "info", repoURL}, &out)
+		})
+		if runErr != nil {
+			t.Fatalf("run: %v\noutput:\n%s", runErr, out.String())
+		}
+		if stderr != "" {
+			t.Errorf("stderr should be empty without -d, got:\n%s", stderr)
 		}
 	})
 

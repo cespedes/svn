@@ -1,10 +1,54 @@
 package svn
 
 import (
+	"bytes"
 	"errors"
+	"io"
 	"net"
+	"strings"
 	"testing"
 )
+
+// TestServerDebug checks that Server.Debug logs every Item Serve reads
+// or writes, prefixed "> "/"< ", including the greeting itself (unlike
+// Client.SetDebug, Serve has no already-handshaken connection handed to
+// it -- it writes the greeting itself, so Debug being set from the start
+// sees all of it).
+func TestServerDebug(t *testing.T) {
+	clientSide, serverSide := net.Pipe()
+	defer clientSide.Close()
+
+	var buf bytes.Buffer
+	var server Server
+	server.Debug = &buf
+	server.GetLatestRev = func() (int, error) { return 7, nil }
+
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- server.Serve(serverSide, serverSide) }()
+
+	c, err := NewClient(clientSide, clientSide, "svn+ssh://example.com/repo")
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	if _, err := c.GetLatestRev(); err != nil {
+		t.Fatalf("GetLatestRev: %v", err)
+	}
+	clientSide.Close()
+	if err := <-serveErr; err != io.EOF {
+		t.Fatalf("Serve: %v", err)
+	}
+
+	logged := buf.String()
+	if !strings.Contains(logged, "> ( success") {
+		t.Errorf("debug log missing the server's own greeting:\n%s", logged)
+	}
+	if !strings.Contains(logged, "< ( get-latest-rev") {
+		t.Errorf("debug log missing the received command:\n%s", logged)
+	}
+	if !strings.Contains(logged, "> ( success ( 7 ) )") {
+		t.Errorf("debug log missing the sent response:\n%s", logged)
+	}
+}
 
 // TestServerUpdateAndSetPathInvokeCallbacks checks that Server.Update and
 // Server.SetPath are actually called with the parsed command arguments.

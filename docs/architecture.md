@@ -38,7 +38,20 @@ protocol stack:
    unwraps the protocol's own `( success ( ... ) )` / `( failure ( ... ) )`
    envelope (`response.go`), turning a `failure` into a Go `error`. Not
    every response uses this envelope — `Client.Commit`'s own deferred
-   response is a notable exception (see below).
+   response is a notable exception (see below). Every read and write
+   already has the parsed `Item` in hand at exactly one point each
+   (`Write`, right after `Marshal`; `Read`, right after the `Itemizer`
+   returns it) — an optional `debug io.Writer` field logs it there,
+   prefixed `"> "`/`"< "`, giving `Client.SetDebug`/`Server.Debug` a full
+   wire trace for free, at the `Item` level rather than raw bytes (whose
+   chunk boundaries across a pipe/socket read are misleading — the same
+   reason every wire capture done while building this package moved to
+   logging whole items instead). `Client.SetDebug` can only ever be
+   called once `Connect`/`NewClient` already returned, after their own
+   handshake is done, so it can't log that; the package-level
+   `DefaultDebug` variable, read into a new `Client`'s own `conn` before
+   the handshake runs (mirroring `net/http.DefaultTransport`'s own
+   set-once-at-startup convention), is what covers it instead.
 5. **Client** (`client.go`) implements the client side of the handshake
    (greeting, version/capability negotiation, `EXTERNAL`/anonymous auth)
    and individual RPCs on top of `conn`. `Connect(address)` supports

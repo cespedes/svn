@@ -110,6 +110,16 @@ read-only. A `Client` made with `NewClient` (over a caller-supplied
 connection) can't do this, since it has no way to reopen that connection
 itself.
 
+`c.SetDebug(os.Stderr)` (or any other `io.Writer`) makes the `Client` log
+every message it sends and receives from then on, prefixed `"> "`/`"< "`
+(like `curl -v`); `nil` stops it. Since `Connect`/`NewClient` already
+complete the initial handshake before returning, `SetDebug` can never log
+it; set the package-level `svn.DefaultDebug` beforehand instead to also
+capture that. `go-svn -d <subcommand> ...` (the `-d` flag goes *before*
+the subcommand name, since it isn't specific to any one of them) uses
+`DefaultDebug` for exactly this reason, to show the whole exchange
+including the handshake.
+
 ## Checking out, updating and diffing: svn.Editor
 
 `Client.Checkout`/`Client.Update`/`Client.Diff` each drive a real "svn
@@ -162,6 +172,10 @@ err := server.Serve(os.Stdin, os.Stdout)
 ```
 
 See [`examples/server`](examples/server) for a runnable version of this.
+Setting `server.Debug = os.Stderr` (or any other `io.Writer`) logs every
+message `Serve` sends and receives, the same way `Client.SetDebug` does
+-- including the initial greeting, since `Serve` writes it itself rather
+than receiving an already-handshaken connection.
 
 ## svnfs: an io/fs.FS adapter
 

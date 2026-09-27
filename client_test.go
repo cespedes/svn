@@ -1,6 +1,7 @@
 package svn
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -8,6 +9,7 @@ import (
 	"net"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -396,6 +398,105 @@ func TestClientConcurrentUse(t *testing.T) {
 	close(errs)
 	for err := range errs {
 		t.Error(err)
+	}
+
+	clientSide.Close()
+	if err := <-serveErr; err != io.EOF {
+		t.Fatalf("Serve: %v", err)
+	}
+}
+
+// TestClientSetDebug checks that SetDebug logs each Item sent/received
+// after it's called, prefixed "> "/"< ", but nothing from the handshake
+// that already completed before it was called, and that passing nil
+// stops logging again.
+func TestClientSetDebug(t *testing.T) {
+	clientSide, serverSide := net.Pipe()
+	defer serverSide.Close()
+
+	var server Server
+	server.GetLatestRev = func() (int, error) { return 42, nil }
+
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- server.Serve(serverSide, serverSide) }()
+
+	c, err := NewClient(clientSide, clientSide, "svn+ssh://example.com/repo")
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	var buf bytes.Buffer
+	c.SetDebug(&buf)
+	if _, err := c.GetLatestRev(); err != nil {
+		t.Fatalf("GetLatestRev: %v", err)
+	}
+
+	logged := buf.String()
+	if !strings.Contains(logged, "> ( get-latest-rev") {
+		t.Errorf("debug log missing the sent command:\n%s", logged)
+	}
+	if !strings.Contains(logged, "< ") || !strings.Contains(logged, "42") {
+		t.Errorf("debug log missing the received response:\n%s", logged)
+	}
+	if strings.Contains(logged, "edit-pipeline") {
+		t.Errorf("debug log should not include the handshake, which completed before SetDebug was called:\n%s", logged)
+	}
+
+	buf.Reset()
+	c.SetDebug(nil)
+	if _, err := c.GetLatestRev(); err != nil {
+		t.Fatalf("GetLatestRev: %v", err)
+	}
+	if buf.Len() != 0 {
+		t.Errorf("debug log should be empty after SetDebug(nil), got:\n%s", buf.String())
+	}
+
+	clientSide.Close()
+	if err := <-serveErr; err != io.EOF {
+		t.Fatalf("Serve: %v", err)
+	}
+}
+
+// TestNewClientDefaultDebugIncludesHandshake checks that, unlike
+// Client.SetDebug (which can only ever be called once Connect/NewClient
+// has already returned, after their own handshake is long done),
+// DefaultDebug -- set beforehand -- captures the handshake too, since
+// NewClient reads it into the new Client's own conn before performing
+// the handshake.
+func TestNewClientDefaultDebugIncludesHandshake(t *testing.T) {
+	clientSide, serverSide := net.Pipe()
+	defer serverSide.Close()
+
+	var server Server
+	server.GetLatestRev = func() (int, error) { return 42, nil }
+
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- server.Serve(serverSide, serverSide) }()
+
+	var buf bytes.Buffer
+	old := DefaultDebug
+	DefaultDebug = &buf
+	defer func() { DefaultDebug = old }()
+
+	c, err := NewClient(clientSide, clientSide, "svn+ssh://example.com/repo")
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	logged := buf.String()
+	if !strings.Contains(logged, "edit-pipeline") {
+		t.Errorf("debug log missing the handshake (greeting/version negotiation):\n%s", logged)
+	}
+	if !strings.Contains(logged, "< ( success") {
+		t.Errorf("debug log missing the server's own greeting:\n%s", logged)
+	}
+
+	buf.Reset()
+	if _, err := c.GetLatestRev(); err != nil {
+		t.Fatalf("GetLatestRev: %v", err)
+	}
+	if !strings.Contains(buf.String(), "get-latest-rev") {
+		t.Errorf("debug log missing a later RPC too, after the handshake:\n%s", buf.String())
 	}
 
 	clientSide.Close()

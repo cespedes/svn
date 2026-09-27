@@ -1,6 +1,7 @@
 package svn
 
 import (
+	"fmt"
 	"io"
 )
 
@@ -9,9 +10,10 @@ const SvnVersion = 2
 
 // conn is a representation of a connection between a client and a server.
 type conn struct {
-	r io.Reader
-	w io.Writer
-	i *Itemizer
+	r     io.Reader
+	w     io.Writer
+	i     *Itemizer
+	debug io.Writer // if non-nil, every Item read/written is logged here
 }
 
 // Write converts "what" into an Item,
@@ -20,6 +22,9 @@ func (c *conn) Write(what any) error {
 	item, err := Marshal(what)
 	if err != nil {
 		return err
+	}
+	if c.debug != nil {
+		fmt.Fprintf(c.debug, "> %s\n", item)
 	}
 	_, err = c.w.Write([]byte(item.String() + " "))
 	return err
@@ -67,6 +72,9 @@ func (c *conn) Read(where any) error {
 	item, err := c.i.Item()
 	if err != nil {
 		return err
+	}
+	if c.debug != nil {
+		fmt.Fprintf(c.debug, "< %s\n", item)
 	}
 	return Unmarshal(item, where)
 }

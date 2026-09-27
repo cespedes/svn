@@ -174,6 +174,14 @@ type Server struct {
 	// sequence of editor commands as Items, or an error to send an
 	// "abort-edit" instead.
 	FinishReport func(paths []ReportedPath) ([]Item, error)
+
+	// Debug, if non-nil, makes Serve log every Item it reads from or
+	// writes to the connection here, prefixed with "> " (sent) or "< "
+	// (received) -- the same convention e.g. "curl -v" uses. The initial
+	// greeting is included, unlike [Client.SetDebug]'s own handshake
+	// exclusion, since Serve writes it itself rather than receiving an
+	// already-handshaken connection.
+	Debug io.Writer
 }
 
 // errMalformedNetworkData is the failure Serve reports when it can't
@@ -192,8 +200,9 @@ var errMalformedNetworkData = Error{
 // cleanly, or another error otherwise.
 func (s *Server) Serve(r io.Reader, w io.Writer) error {
 	conn := conn{
-		r: r,
-		w: w,
+		r:     r,
+		w:     w,
+		debug: s.Debug,
 	}
 
 	var err error
