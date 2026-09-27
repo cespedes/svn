@@ -141,8 +141,8 @@ time, queued behind each other. For real concurrency, use a pool of
 
 ## Command-line client: go-svn
 
-`cmd/go-svn` is a small `svn`-like command-line client built on top of this
-package:
+[`cmd/go-svn`](cmd/go-svn) is a small `svn`-like command-line client built
+on top of this package:
 
 ```sh
 go install github.com/cespedes/svn/cmd/go-svn@latest
