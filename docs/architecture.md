@@ -139,9 +139,15 @@ It's used in two, unrelated places:
 `Editor` (`client_editor.go`) is a struct of callback fields, one per
 Editor Command Set command, mirroring `Server`'s own callback-field style;
 `driveEditor` parses an incoming sequence and calls one field per command.
-`Client.Checkout`/`Update`/`Diff` share this (`client_editor.go`'s
-`reportAndApply` drives the wire exchange itself; `driveEditor` is the
-reader). None of `Client`, `Editor`, or `driveEditor` ever touches a
+It's a plain function taking a `*conn` directly (not a `*Client` method),
+since parsing is exactly as direction-agnostic as `EditorWriter`'s own
+writing is -- deliberately kept ready to read a client-driven commit
+server-side too, not just what `Client.Checkout`/`Update`/`Diff` share
+today (`client_editor.go`'s `reportAndApply` drives the wire exchange
+itself; `driveEditor` is the reader, stopping once it acks
+`close-edit`/`abort-edit`, leaving whatever deferred response the
+command that started the exchange still owes to its own caller).
+None of `Client`, `Editor`, or `driveEditor` ever touches a
 filesystem, a database, or any other storage on its own — this package
 exists to *build* SVN clients/servers out of, not to *be* a high-level,
 storage-backed client itself. `cmd/go-svn`'s `diskEditor` is the concrete,
@@ -167,11 +173,18 @@ incoming, client-driven Editor Command Set, deciding what "committing" it
 means against a backing store, or reporting back a new revision. Building
 this would need:
 
-- Generalizing `driveEditor`/`Editor` to read from a `*conn` directly
-  (today `driveEditor` is a `*Client` method) — the wire format is the
-  same regardless of direction, so the same reader and callback shape
-  should serve both a client parsing a server-driven edit and a server
-  parsing a client-driven one.
+- ~~Generalizing `driveEditor`/`Editor` to read from a `*conn` directly~~
+  **done**: `driveEditor` is now a package-level function taking a
+  `*conn`, not a `*Client` method, and stops right after acking
+  `close-edit`/`abort-edit` rather than also reading `finish-report`'s
+  own deferred response itself -- that response's shape is specific to
+  whichever Main Command Set command started the exchange
+  (`finish-report` for an update/diff/switch, `commit` for a commit), so
+  reading (or, server-side, writing) it is the caller's own job now
+  (`reportAndApply` does the reading, client-side). The wire format is
+  the same regardless of direction, so the same reader and callback
+  shape already serves a client parsing a server-driven edit, and is
+  ready to serve a server parsing a client-driven one the same way.
 - New `Server` callbacks mirroring the existing `Update` + `FinishReport`
   split: something invoked when `"commit"` arrives (to let an
   implementation open its own transaction and return the `Editor` to

@@ -176,9 +176,20 @@ func (c *Client) reportAndApply(cmd string, params []any, reportRev int, startEm
 		return 0, err
 	}
 
-	gotRev, aborted, err := c.driveEditor(editor)
+	gotRev, aborted, err := driveEditor(&c.conn, editor)
 	if err != nil {
 		return 0, err
+	}
+	// driveEditor already acked close-edit/abort-edit; the deferred
+	// response to our own earlier "finish-report" is a separate read,
+	// since it belongs to finish-report specifically (a different Main
+	// Command Set command entirely, e.g. "commit", would owe a
+	// differently-shaped deferred response of its own instead -- not
+	// driveEditor's concern, since it only reads/dispatches the Editor
+	// Command Set itself, not whatever a caller is using it to answer).
+	var final Item
+	if err := c.conn.ReadResponse(&final); err != nil {
+		return 0, fmt.Errorf("reading finish-report's own response: %w", err)
 	}
 	if aborted {
 		return 0, errors.New("aborted by server")
@@ -189,16 +200,26 @@ func (c *Client) reportAndApply(cmd string, params []any, reportRev int, startEm
 	return *gotRev, nil
 }
 
-// driveEditor reads and parses the Editor Command Set sequence a
-// "finish-report" response streams (after a report/editor exchange has
-// already gotten this far, driven by reportAndApply), calling editor's
-// own fields for each command, until "close-edit" or "abort-edit" ends
-// it -- acking either the same way a real client does, then reading the
-// final response to "finish-report" itself, exactly mirroring what
-// Serve's own "finish-report" handling expects back (see
-// handleFinishReport in server.go). rev is the revision the server's own
-// "target-rev" reported (nil if it never sent one), and aborted reports
-// whether the server sent "abort-edit" rather than completing normally.
+// driveEditor reads and parses an Editor Command Set sequence off cn,
+// calling editor's own fields for each command, until "close-edit" or
+// "abort-edit" ends it -- acking either the same way a real client does
+// (an empty success) before returning. It does not read whatever
+// deferred response the Main Command Set command that started the
+// exchange in the first place (e.g. "finish-report", "commit") still
+// owes the other side once the edit itself is done -- that response's
+// own shape is specific to that command, not to the Editor Command Set
+// itself, so reading it is the caller's job (see reportAndApply).
+// rev is the revision the server's own "target-rev" reported (nil if it
+// never sent one), and aborted reports whether the server sent
+// "abort-edit" rather than completing normally.
+//
+// This works the same regardless of which side of the connection cn
+// belongs to: parsing an incoming Editor Command Set is direction-
+// agnostic, the mirror image of [EditorWriter] (which only ever
+// writes one) -- reportAndApply below uses this for a Client parsing
+// what a server sends driving a checkout/update/diff, and it's meant to
+// be reused the same way for a Server parsing what a client sends
+// driving a commit, once this package supports receiving one.
 //
 // This keeps no token→node map for directories at all: every "add-dir"/
 // "open-dir"/"add-file"/"open-file"'s own Path is already the full path
@@ -212,12 +233,12 @@ func (c *Client) reportAndApply(cmd string, params []any, reportRev int, startEm
 // to the same path, since those commands only ever carry a token, not a
 // path -- editor's own callbacks never see a token at all, only the path
 // it already resolves to.
-func (c *Client) driveEditor(editor Editor) (rev *int, aborted bool, err error) {
+func driveEditor(cn *conn, editor Editor) (rev *int, aborted bool, err error) {
 	pending := map[string]*pendingFile{}
 
 	for {
 		var item Item
-		if err := c.conn.Read(&item); err != nil {
+		if err := cn.Read(&item); err != nil {
 			return rev, false, fmt.Errorf("reading editor command: %w", err)
 		}
 		var command struct {
@@ -466,21 +487,13 @@ func (c *Client) driveEditor(editor Editor) (rev *int, aborted bool, err error) 
 				}
 			}
 		case "close-edit":
-			if err := c.conn.WriteSuccess([]any{}); err != nil {
+			if err := cn.WriteSuccess([]any{}); err != nil {
 				return rev, false, fmt.Errorf("acking close-edit: %w", err)
-			}
-			var final Item
-			if err := c.conn.ReadResponse(&final); err != nil {
-				return rev, false, fmt.Errorf("reading finish-report's own response: %w", err)
 			}
 			return rev, false, nil
 		case "abort-edit":
-			if err := c.conn.WriteSuccess([]any{}); err != nil {
+			if err := cn.WriteSuccess([]any{}); err != nil {
 				return rev, false, fmt.Errorf("acking abort-edit: %w", err)
-			}
-			var final Item
-			if err := c.conn.ReadResponse(&final); err != nil {
-				return rev, false, fmt.Errorf("reading finish-report's own response: %w", err)
 			}
 			return rev, true, nil
 		default:
