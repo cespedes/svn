@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -162,6 +163,148 @@ func TestExport(t *testing.T) {
 	})
 }
 
+// TestCLIOptionOrdering checks that "-r"/"-v" only work after the
+// subcommand name, mirroring a real "svn"'s own command-line shape
+// (e.g. "svn cat -r5 URL", not "svn -r5 cat URL"), and that a joined
+// "-rN" works the same as a separate "-r N".
+func TestCLIOptionOrdering(t *testing.T) {
+	requireRealSVNTools(t)
+
+	repoPath := filepath.Join(t.TempDir(), "repo")
+	if out, err := exec.Command("svnadmin", "create", repoPath).CombinedOutput(); err != nil {
+		t.Fatalf("svnadmin create: %v\n%s", err, out)
+	}
+	repoURL := "file://" + repoPath
+
+	wc := t.TempDir()
+	svnCmd := func(args ...string) {
+		t.Helper()
+		args = append([]string{"--non-interactive"}, args...)
+		cmd := exec.Command("svn", args...)
+		cmd.Dir = wc
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("svn %v: %v\n%s", args, err, out)
+		}
+	}
+	write := func(name, content string) {
+		t.Helper()
+		p := filepath.Join(wc, name)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	svnCmd("checkout", "-q", repoURL, ".")
+	write("main.go", "package main\n")
+	svnCmd("add", "-q", "main.go")
+	svnCmd("commit", "-q", "-m", "r1")
+	write("main.go", "package main\n\nfunc main() {}\n")
+	svnCmd("commit", "-q", "-m", "r2")
+	write("main.go", "package main\n\nfunc main() { println(\"hi\") }\n")
+	svnCmd("commit", "-q", "-m", "r3")
+
+	t.Run("-r after the subcommand, joined", func(t *testing.T) {
+		var out bytes.Buffer
+		if err := run([]string{"go-svn", "cat", "-r1", repoURL + "/main.go"}, &out); err != nil {
+			t.Fatalf("cat: %v", err)
+		}
+		if out.String() != "package main\n" {
+			t.Errorf("cat -r1 = %q, want %q", out.String(), "package main\n")
+		}
+	})
+
+	t.Run("-r after the subcommand, separate", func(t *testing.T) {
+		var out bytes.Buffer
+		if err := run([]string{"go-svn", "cat", "-r", "1", repoURL + "/main.go"}, &out); err != nil {
+			t.Fatalf("cat: %v", err)
+		}
+		if out.String() != "package main\n" {
+			t.Errorf("cat -r 1 = %q, want %q", out.String(), "package main\n")
+		}
+	})
+
+	t.Run("-r before the subcommand is rejected", func(t *testing.T) {
+		var out bytes.Buffer
+		err := run([]string{"go-svn", "-r1", "cat", repoURL + "/main.go"}, &out)
+		if err == nil {
+			t.Fatalf("expected an error, got none (output: %s)", out.String())
+		}
+		if !strings.Contains(err.Error(), "unknown subcommand") {
+			t.Errorf("error = %q, want it to mention an unknown subcommand", err.Error())
+		}
+	})
+
+	t.Run("-v rejected by a subcommand that doesn't accept it", func(t *testing.T) {
+		var out bytes.Buffer
+		err := run([]string{"go-svn", "cat", "-v", repoURL + "/main.go"}, &out)
+		if err == nil {
+			t.Fatalf("expected an error, got none (output: %s)", out.String())
+		}
+	})
+
+	// Reported as a real bug: "info" accepted "-r" (unlike, say, a
+	// subcommand that rejects it outright) but silently ignored it,
+	// always reporting the latest revision regardless.
+	t.Run("info -r actually affects the reported revision", func(t *testing.T) {
+		var out bytes.Buffer
+		if err := run([]string{"go-svn", "info", "-r1", repoURL}, &out); err != nil {
+			t.Fatalf("info: %v", err)
+		}
+		if !strings.Contains(out.String(), "Revision: 1") {
+			t.Errorf("info -r1 output missing \"Revision: 1\":\n%s", out.String())
+		}
+		if !strings.Contains(out.String(), "Last Changed Rev: 1") {
+			t.Errorf("info -r1 output missing \"Last Changed Rev: 1\":\n%s", out.String())
+		}
+
+		out.Reset()
+		if err := run([]string{"go-svn", "info", repoURL}, &out); err != nil {
+			t.Fatalf("info: %v", err)
+		}
+		if !strings.Contains(out.String(), "Revision: 3") {
+			t.Errorf("info (no -r) output missing \"Revision: 3\":\n%s", out.String())
+		}
+	})
+
+	// Reported as a real bug: a real "svn log -rN" (no ":N2" range)
+	// shows exactly that one revision, but "go-svn log -rN" showed N
+	// and every revision before it too, down to the beginning of
+	// history -- because a bare "-rN" left the log's own end-revision
+	// nil, which Client.Log treats as "revision 0" (the same convention
+	// every *other* subcommand's single "-rN" correctly relies on, since
+	// they only ever have one revision slot to begin with).
+	t.Run("log -rN shows only revision N, not everything before it too", func(t *testing.T) {
+		var out bytes.Buffer
+		if err := run([]string{"go-svn", "log", "-r2", repoURL}, &out); err != nil {
+			t.Fatalf("log: %v", err)
+		}
+		if !strings.Contains(out.String(), "r2") {
+			t.Errorf("log -r2 output missing r2:\n%s", out.String())
+		}
+		if strings.Contains(out.String(), "r1") {
+			t.Errorf("log -r2 output should not include r1:\n%s", out.String())
+		}
+		if strings.Contains(out.String(), "r3") {
+			t.Errorf("log -r2 output should not include r3:\n%s", out.String())
+		}
+	})
+
+	t.Run("log -rN:M still shows the whole range", func(t *testing.T) {
+		var out bytes.Buffer
+		if err := run([]string{"go-svn", "log", "-r1:3", repoURL}, &out); err != nil {
+			t.Fatalf("log: %v", err)
+		}
+		for _, want := range []string{"r1", "r2", "r3"} {
+			if !strings.Contains(out.String(), want) {
+				t.Errorf("log -r1:3 output missing %s:\n%s", want, out.String())
+			}
+		}
+	})
+}
+
 // TestCheckoutAndUpdate checks "go-svn checkout"/"go-svn update" against
 // a real svnserve: unlike "export" (a one-shot recursive List/GetFile
 // walk), these drive a real report/editor exchange via
@@ -271,4 +414,78 @@ func TestCheckoutAndUpdate(t *testing.T) {
 			t.Errorf("error = %q, want it to mention the URL does not exist", err.Error())
 		}
 	})
+}
+
+// TestParseArgs checks parseArgs' own option handling against the shape
+// a real "svn" subcommand accepts: "-r"/"-v" after the subcommand name
+// (not before it, which run itself enforces by only ever calling
+// parseArgs with the arguments following the subcommand), "-r" with
+// either a joined ("-r5", "-r5:6") or separate ("-r", "5") value, and a
+// subcommand rejecting an option it doesn't accept.
+func TestParseArgs(t *testing.T) {
+	i := func(n int) *int { return &n }
+
+	cases := []struct {
+		name                     string
+		args                     []string
+		acceptRev, acceptVerbose bool
+		wantPositional           []string
+		wantRev1, wantRev2       *int
+		wantVerbose              bool
+		wantErr                  bool
+	}{
+		{name: "no options", args: []string{"URL"}, acceptRev: true, wantPositional: []string{"URL"}},
+		{name: "joined revision", args: []string{"-r5", "URL"}, acceptRev: true, wantPositional: []string{"URL"}, wantRev1: i(5)},
+		{name: "joined revision range", args: []string{"-r5:9", "URL"}, acceptRev: true, wantPositional: []string{"URL"}, wantRev1: i(5), wantRev2: i(9)},
+		{name: "separate revision", args: []string{"-r", "5", "URL"}, acceptRev: true, wantPositional: []string{"URL"}, wantRev1: i(5)},
+		{name: "option after the positional argument", args: []string{"URL", "-r5"}, acceptRev: true, wantPositional: []string{"URL"}, wantRev1: i(5)},
+		{name: "-v", args: []string{"-v", "URL"}, acceptVerbose: true, wantPositional: []string{"URL"}, wantVerbose: true},
+		{name: "-r and -v together", args: []string{"-r5", "-v", "URL"}, acceptRev: true, acceptVerbose: true, wantPositional: []string{"URL"}, wantRev1: i(5), wantVerbose: true},
+		{name: "-r on a subcommand that doesn't accept it", args: []string{"-r5", "URL"}, wantErr: true},
+		{name: "-v on a subcommand that doesn't accept it", args: []string{"-v", "URL"}, wantErr: true},
+		{name: "-r with no argument at all", args: []string{"-r"}, acceptRev: true, wantErr: true},
+		{name: "-r with a non-numeric argument", args: []string{"-rabc", "URL"}, acceptRev: true, wantErr: true},
+		{name: "-r with a negative revision", args: []string{"-r-1", "URL"}, acceptRev: true, wantErr: true},
+		{name: "-r with a negative range start", args: []string{"-r-1:5", "URL"}, acceptRev: true, wantErr: true},
+		{name: "-r with a negative range end", args: []string{"-r5:-1", "URL"}, acceptRev: true, wantErr: true},
+		{name: "-r0 is a valid revision", args: []string{"-r0", "URL"}, acceptRev: true, wantPositional: []string{"URL"}, wantRev1: i(0)},
+		{name: "unknown option", args: []string{"-x", "URL"}, acceptRev: true, acceptVerbose: true, wantErr: true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			positional, rev1, rev2, verbose, err := parseArgs(c.args, c.acceptRev, c.acceptVerbose)
+			if c.wantErr {
+				if err == nil {
+					t.Fatalf("parseArgs(%v) = nil error, want one", c.args)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseArgs(%v): %v", c.args, err)
+			}
+			if !reflect.DeepEqual(positional, c.wantPositional) {
+				t.Errorf("positional = %v, want %v", positional, c.wantPositional)
+			}
+			if !revEqual(rev1, c.wantRev1) || !revEqual(rev2, c.wantRev2) {
+				t.Errorf("rev1, rev2 = %v, %v, want %v, %v", derefOrNil(rev1), derefOrNil(rev2), derefOrNil(c.wantRev1), derefOrNil(c.wantRev2))
+			}
+			if verbose != c.wantVerbose {
+				t.Errorf("verbose = %v, want %v", verbose, c.wantVerbose)
+			}
+		})
+	}
+}
+
+func revEqual(a, b *int) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
+}
+
+func derefOrNil(p *int) any {
+	if p == nil {
+		return nil
+	}
+	return *p
 }

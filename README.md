@@ -192,21 +192,27 @@ on top of this package:
 go install github.com/cespedes/svn/cmd/go-svn@latest
 
 go-svn info svn+ssh://example.com/repo
-go-svn cat svn+ssh://example.com/repo/trunk/README
-go-svn -v ls svn+ssh://example.com/repo/trunk
-go-svn -r 100:200 log svn+ssh://example.com/repo
+go-svn cat -r100 svn+ssh://example.com/repo/trunk/README
+go-svn ls -v svn+ssh://example.com/repo/trunk
+go-svn log -r100:200 svn+ssh://example.com/repo
 go-svn export svn+ssh://example.com/repo/trunk
 go-svn checkout svn+ssh://example.com/repo/trunk
 go-svn update trunk
 ```
 
-Usage: `go-svn [-v] [-r revision[:revision2]] <subcommand> <repo>`.
-Subcommands: `info`, `cat`, `ls`, `log`, `export <repo> [localdir]`,
-`checkout <repo> [localdir]`, `update <localdir>`. `-r rev` or
-`-r rev1:rev2` selects a revision or revision range where the subcommand
-supports it, and `-v` asks for more detail (`ls`, `log`). `export` writes a
-clean copy of `repo` (no version-control metadata) to `localdir`, or to a
-directory named after `repo`'s own last path segment if `localdir` is
+Usage: `go-svn <subcommand> [-r revision[:revision2]] [-v] <repo>`, matching
+a real `svn`'s own command-line shape: `-r`/`-v` go *after* the subcommand
+name, not before it (`go-svn cat -r100 URL`, not `go-svn -r 100 cat URL`),
+and only the subcommands that actually use a given option accept it at all
+(passing one to a subcommand that doesn't is an error, not silently
+ignored). Subcommands: `info`, `cat`, `ls`, `log`, `export <repo>
+[localdir]`, `checkout <repo> [localdir]`, `update <localdir>`. `-r rev` or
+`-r rev1:rev2` (either joined, as `-r100`/`-r100:200`, or as a separate
+argument, `-r 100`/`-r 100:200`) selects a revision or revision range where
+the subcommand supports it, and `-v` asks for more detail (`ls`, `log`).
+`export` writes a clean copy of `repo` (no version-control metadata) to
+`localdir`, or to a directory named after `repo`'s own last path segment if
+`localdir` is
 omitted. `checkout` writes the same kind of plain, unversioned tree
 `export` does, but by driving a real report/editor exchange (see
 `svn.Editor` above) instead of a one-shot recursive walk -- the difference

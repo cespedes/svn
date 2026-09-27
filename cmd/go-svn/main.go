@@ -2,7 +2,6 @@ package main
 
 import (
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"io/fs"
@@ -24,116 +23,203 @@ func main() {
 	}
 }
 
+// run dispatches to the subcommand named by args[1], mirroring a real
+// "svn"'s own command-line shape: options like "-r"/"-v" go after the
+// subcommand name (e.g. "go-svn cat -r5 URL"), not before it, and only
+// the subcommands that actually use a given option accept it at all --
+// see parseArgs.
 func run(args []string, stdout io.Writer) error {
-	var err error
-	var revStr string
-	var rev1, rev2 int
-	var lrev1, lrev2 *int
-	var verbose bool
-	f := flag.NewFlagSet(args[0], flag.ExitOnError)
-	f.BoolVar(&verbose, "v", false, "verbose")
-	f.StringVar(&revStr, "r", "", "revision (rev or rev1:rev2")
-	f.Parse(args[1:])
-
-	if revStr != "" {
-		srev1, srev2, found := strings.Cut(revStr, ":")
-		rev1, err = strconv.Atoi(srev1)
-		if err != nil {
-			return fmt.Errorf("error parsing -r argument: %w", err)
-		}
-		lrev1 = &rev1
-		if found {
-			rev2, err = strconv.Atoi(srev2)
-			if err != nil {
-				return fmt.Errorf("error parsing -r argument: %w", err)
-			}
-			lrev2 = &rev2
-		}
+	if len(args) < 2 {
+		return errors.New("type 'go-svn help' for usage")
 	}
+	cmdName := args[1]
+	rest := args[2:]
 
-	args = f.Args()
-	if len(args) == 1 && args[0] == "help" {
+	if cmdName == "help" {
 		help(stdout)
 		return nil
 	}
-	if len(args) < 2 {
-		return fmt.Errorf("type 'go-svn help' for usage")
-	}
-	switch args[0] {
+
+	switch cmdName {
 	case "info":
-		if len(args) != 2 {
+		positional, lrev1, lrev2, _, err := parseArgs(rest, true, false)
+		if err != nil {
+			return err
+		}
+		if len(positional) != 1 {
 			return errors.New("subcommand 'info' takes exactly one argument (repo URL)")
 		}
-		if verbose {
-			return errors.New("subcommand 'info' does not accept option '-v'")
-		}
 		if lrev2 != nil {
-			return errors.New("subcommand 'info' does not accept revision range")
+			return errors.New("subcommand 'info' does not accept a revision range")
 		}
-		return svnInfo(args[1], lrev1, stdout)
+		return svnInfo(positional[0], lrev1, stdout)
 	case "cat":
-		if len(args) != 2 {
+		positional, lrev1, lrev2, _, err := parseArgs(rest, true, false)
+		if err != nil {
+			return err
+		}
+		if len(positional) != 1 {
 			return errors.New("subcommand 'cat' takes exactly one argument (repo URL)")
 		}
-		if verbose {
-			return errors.New("subcommand 'info' does not accept option '-v'")
-		}
 		if lrev2 != nil {
-			return errors.New("subcommand 'info' does not accept revision range")
+			return errors.New("subcommand 'cat' does not accept a revision range")
 		}
-		return svnCat(args[1], lrev1, stdout)
+		return svnCat(positional[0], lrev1, stdout)
 	case "ls":
-		if len(args) != 2 {
+		positional, lrev1, lrev2, verbose, err := parseArgs(rest, true, true)
+		if err != nil {
+			return err
+		}
+		if len(positional) != 1 {
 			return errors.New("subcommand 'ls' takes exactly one argument (repo URL)")
 		}
 		if lrev2 != nil {
-			return errors.New("subcommand 'ls' does not accept revision range")
+			return errors.New("subcommand 'ls' does not accept a revision range")
 		}
-		return svnLs(args[1], lrev1, verbose, stdout)
+		return svnLs(positional[0], lrev1, verbose, stdout)
 	case "log":
-		if len(args) != 2 {
+		positional, lrev1, lrev2, verbose, err := parseArgs(rest, true, true)
+		if err != nil {
+			return err
+		}
+		if len(positional) != 1 {
 			return errors.New("subcommand 'log' takes exactly one argument (repo URL)")
 		}
-		return svnLog(args[1], lrev1, lrev2, verbose, stdout)
+		return svnLog(positional[0], lrev1, lrev2, verbose, stdout)
 	case "export":
-		if len(args) > 3 {
+		positional, lrev1, lrev2, _, err := parseArgs(rest, true, false)
+		if err != nil {
+			return err
+		}
+		if len(positional) < 1 || len(positional) > 2 {
 			return errors.New("subcommand 'export' takes a repo URL and, optionally, a destination directory")
 		}
 		if lrev2 != nil {
-			return errors.New("subcommand 'export' does not accept revision range")
+			return errors.New("subcommand 'export' does not accept a revision range")
 		}
 		dest := ""
-		if len(args) == 3 {
-			dest = args[2]
+		if len(positional) == 2 {
+			dest = positional[1]
 		}
-		return svnExport(args[1], lrev1, dest, stdout)
+		return svnExport(positional[0], lrev1, dest, stdout)
 	case "checkout":
-		if len(args) > 3 {
+		positional, lrev1, lrev2, _, err := parseArgs(rest, true, false)
+		if err != nil {
+			return err
+		}
+		if len(positional) < 1 || len(positional) > 2 {
 			return errors.New("subcommand 'checkout' takes a repo URL and, optionally, a local directory")
 		}
 		if lrev2 != nil {
-			return errors.New("subcommand 'checkout' does not accept revision range")
+			return errors.New("subcommand 'checkout' does not accept a revision range")
 		}
 		dest := ""
-		if len(args) == 3 {
-			dest = args[2]
+		if len(positional) == 2 {
+			dest = positional[1]
 		}
-		return svnCheckout(args[1], lrev1, dest, stdout)
+		return svnCheckout(positional[0], lrev1, dest, stdout)
 	case "update":
-		if len(args) != 2 {
+		positional, lrev1, lrev2, _, err := parseArgs(rest, true, false)
+		if err != nil {
+			return err
+		}
+		if len(positional) != 1 {
 			return errors.New("subcommand 'update' takes exactly one argument (a local directory 'checkout' produced)")
 		}
-		if verbose {
-			return errors.New("subcommand 'update' does not accept option '-v'")
-		}
 		if lrev2 != nil {
-			return errors.New("subcommand 'update' does not accept revision range")
+			return errors.New("subcommand 'update' does not accept a revision range")
 		}
-		return svnUpdate(args[1], lrev1, stdout)
+		return svnUpdate(positional[0], lrev1, stdout)
 	default:
 		return fmt.Errorf(`unknown subcommand: '%s'
-Type 'svn help' for usage`, args[0])
+Type 'go-svn help' for usage`, cmdName)
 	}
+}
+
+// parseArgs scans args (everything after the subcommand name) for "-r"/
+// "-v" options mixed in among positional arguments, the same way a real
+// "svn" subcommand accepts them -- e.g. "svn cat -r5 URL" or
+// "svn cat URL -r5", not just options before the subcommand name.
+// acceptRev/acceptVerbose report whether this particular subcommand
+// accepts "-r"/"-v" at all: passing one it doesn't is reported as an
+// error here, the same way a real "svn" subcommand rejects an option it
+// doesn't support, rather than silently ignored. "-r" takes its value
+// either joined ("-r5", "-r5:6") or as a separate argument ("-r 5",
+// "-r 5:6"); "-v" takes no value.
+func parseArgs(args []string, acceptRev, acceptVerbose bool) (positional []string, rev1, rev2 *int, verbose bool, err error) {
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case arg == "-r":
+			if !acceptRev {
+				return nil, nil, nil, false, fmt.Errorf("this subcommand does not accept option '-r'")
+			}
+			i++
+			if i >= len(args) {
+				return nil, nil, nil, false, errors.New("option '-r' expects an argument")
+			}
+			if rev1, rev2, err = parseRevArg(args[i]); err != nil {
+				return nil, nil, nil, false, err
+			}
+		case strings.HasPrefix(arg, "-r") && arg != "-r":
+			if !acceptRev {
+				return nil, nil, nil, false, fmt.Errorf("this subcommand does not accept option '-r'")
+			}
+			if rev1, rev2, err = parseRevArg(strings.TrimPrefix(arg, "-r")); err != nil {
+				return nil, nil, nil, false, err
+			}
+		case arg == "-v":
+			if !acceptVerbose {
+				return nil, nil, nil, false, fmt.Errorf("this subcommand does not accept option '-v'")
+			}
+			verbose = true
+		case strings.HasPrefix(arg, "-") && arg != "-":
+			return nil, nil, nil, false, fmt.Errorf("unknown option: %s", arg)
+		default:
+			positional = append(positional, arg)
+		}
+	}
+	return positional, rev1, rev2, verbose, nil
+}
+
+// parseRevArg parses s -- the value following "-r", or the remainder of
+// a joined "-rN"/"-rN:M" option -- the same way "svn"'s own "-r"
+// argument works: either a single revision ("5") or a range ("5:10").
+func parseRevArg(s string) (rev1, rev2 *int, err error) {
+	s1, s2, found := strings.Cut(s, ":")
+	r1, err := parseRevNumber(s1)
+	if err != nil {
+		return nil, nil, err
+	}
+	rev1 = &r1
+	if found {
+		r2, err := parseRevNumber(s2)
+		if err != nil {
+			return nil, nil, err
+		}
+		rev2 = &r2
+	}
+	return rev1, rev2, nil
+}
+
+// parseRevNumber parses s as a single revision number: a non-negative
+// integer. "svn"'s own "-r" also accepts symbolic revisions ("HEAD",
+// "BASE", ...), none of which this package's Client resolves, so those
+// aren't accepted here either -- rejected the same way a negative
+// number is, rather than silently accepted and sent to the server as
+// some other, wildly different revision (a plain Go int, negative or
+// not, marshals as an unsigned wire number, so a negative one would
+// otherwise wrap around into a huge, nonsensical revision instead of
+// failing clearly).
+func parseRevNumber(s string) (int, error) {
+	n, err := strconv.Atoi(s)
+	if err != nil {
+		return 0, fmt.Errorf("invalid revision %q: %w", s, err)
+	}
+	if n < 0 {
+		return 0, fmt.Errorf("invalid revision %q: revision numbers must not be negative", s)
+	}
+	return n, nil
 }
 
 func svnInfo(repo string, lrev *int, stdout io.Writer) error {
@@ -143,12 +229,17 @@ func svnInfo(repo string, lrev *int, stdout io.Writer) error {
 		return err
 	}
 
-	rev, err := c.GetLatestRev()
-	if err != nil {
-		return err
+	rev := 0
+	if lrev != nil {
+		rev = *lrev
+	} else {
+		rev, err = c.GetLatestRev()
+		if err != nil {
+			return err
+		}
 	}
 
-	stat, err := c.Stat("", nil)
+	stat, err := c.Stat("", lrev)
 	if err != nil {
 		return err
 	}
@@ -261,6 +352,14 @@ func svnLog(repo string, lrev1 *int, lrev2 *int, verbose bool, stdout io.Writer)
 
 	if err != nil {
 		return err
+	}
+
+	// A single "-rN" (no ":N2" range) means exactly revision N, the same
+	// way a real "svn log -rN" behaves -- not "from N down to the
+	// beginning of history", which is what leaving lrev2 nil would mean
+	// to Client.Log (a nil endRev defaults to revision 0).
+	if lrev1 != nil && lrev2 == nil {
+		lrev2 = lrev1
 	}
 
 	logs, err := c.Log(nil, lrev1, lrev2, verbose)
@@ -672,16 +771,20 @@ func exportFile(c *svn.Client, svnPath string, rev *int, destPath string) error 
 }
 
 func help(stdout io.Writer) {
-	fmt.Fprintln(stdout, `usage: go-svn [-v] [-r revision[:revision2]] <subcommand> <repo>
+	fmt.Fprintln(stdout, `usage: go-svn <subcommand> [-r revision[:revision2]] [-v] <repo>
+
+Options go after the subcommand name and before <repo> (e.g.
+"go-svn cat -r100 URL"), and only the subcommands that use a given
+option accept it at all.
 
 Available subcommands:
-   info
-   cat
-   ls
-   log
-   export <repo> [localdir]
-   checkout <repo> [localdir]
-   update <localdir>
+   info [-r rev] <repo>
+   cat [-r rev] <repo>
+   ls [-r rev] [-v] <repo>
+   log [-r rev[:rev2]] [-v] <repo>
+   export [-r rev] <repo> [localdir]
+   checkout [-r rev] <repo> [localdir]
+   update [-r rev] <localdir>
 
 go-svn is a client for the Subversion protocol.`)
 }
