@@ -51,7 +51,7 @@ of this same table):
 | `propget` / `proplist` on a file | partial | `GetFile`'s properties are returned if requested; there's no dedicated single-property call |
 | `propget` / `proplist` on a directory | ❌ | |
 | `lock` / `unlock` | ❌ | |
-| `commit` / `add` / `delete` / `mkdir` / `import` | ✅ | `Client.Commit` sends "commit" and then drives the client's own end of the Editor Command Set, built by the caller via `EditorWriter` (the same builder `Server.FinishReport` callbacks already use on the read side, just travelling in the opposite direction on the wire) -- there's no `add`/`delete`/`mkdir`/`import`-specific method, since all of them are just a particular shape of editor sequence handed to the same `Commit`. `Client` itself never touches a filesystem: `cmd/go-svn` has no `commit` subcommand yet (nothing in `cmd/go-svn` currently builds a `[]Item` from a real, disk-backed working copy's own local changes) |
+| `commit` / `add` / `delete` / `mkdir` / `import` | ✅ | `Client.Commit` sends "commit" and then drives the client's own end of the Editor Command Set, built by the caller via `EditorWriter` (the same builder `Server.FinishReport` callbacks already use on the read side, just travelling in the opposite direction on the wire) -- there's no `add`/`delete`/`mkdir`/`import`-specific method, since all of them are just a particular shape of editor sequence handed to the same `Commit`. `Client` itself never touches a filesystem: `cmd/go-svn commit` is what actually builds that `[]Item`, by comparing a real, disk-backed working copy against the repository (see below) -- there's no staged add/remove step, unlike a real `svn add`/`svn rm`; whatever differs from the repository is what gets committed |
 | `mergeinfo` | ❌ | |
 
 ### Server (`svn.Server`)

@@ -2,11 +2,15 @@
 
 `go-svn` is a small `svn`-like command-line client built on top of
 [`github.com/cespedes/svn`](https://github.com/cespedes/svn), the SVN
-(Subversion) wire protocol implementation this directory lives in. It only
-covers read-only *repository* operations -- there is no way to change
-anything in the repository itself (`commit`, `add`, ...). `checkout`/
-`update` do write to the local filesystem (the only place in this codebase
-that does), but never touch the repository.
+(Subversion) wire protocol implementation this directory lives in.
+`checkout`/`update`/`commit` are the only subcommands that touch a local
+filesystem (the only place in this codebase that does); `commit` is also
+the only one that changes the repository itself, by comparing a working
+copy `checkout` produced against the repository and sending whatever
+differs -- there is no separate `add`/`delete`/`mkdir`/`import`, unlike a
+real `svn`: a file dropped into (or removed from) a checked-out
+directory by any means is committed as an addition (or a deletion) the
+next time `commit` runs, with no staged "schedule" step in between.
 
 ## Installation
 
@@ -35,10 +39,13 @@ ignored.
 | `export <repo> [localdir]` | writes a clean copy of `repo` (no version-control metadata) to `localdir`, or to a directory named after `repo`'s own last path segment if `localdir` is omitted |
 | `checkout <repo> [localdir]` | like `export`, but driving a real report/editor exchange instead of a one-shot recursive walk, so `update` can later bring the result forward touching only what changed |
 | `update <localdir>` | brings a directory `checkout` produced up to a newer revision (default: latest) in place |
+| `commit -m message <localdir>` | sends every local change under `<localdir>` (added, removed or modified since it was last checked out or updated) back to the repository as a new revision |
 
 `-r rev` or `-r rev1:rev2` selects a revision or revision range, where the
 subcommand supports it, either joined (`-r100`, `-r100:200`) or as a
-separate argument (`-r 100`, `-r 100:200`).
+separate argument (`-r 100`, `-r 100:200`). `-m message` (`commit` only)
+takes the commit message the same way, joined (`-mfix bug`) or separate
+(`-m "fix bug"`).
 
 `repo` is a repository URL: `file://` and `svn+ssh://` are supported (see
 the main package's own
@@ -61,4 +68,5 @@ go-svn log -r100:200 svn+ssh://example.com/repo
 go-svn export svn+ssh://example.com/repo/trunk
 go-svn checkout svn+ssh://example.com/repo/trunk
 go-svn update trunk
+go-svn commit -m "fix bug" trunk
 ```

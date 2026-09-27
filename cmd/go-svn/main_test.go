@@ -454,6 +454,133 @@ func TestCheckoutAndUpdate(t *testing.T) {
 	})
 }
 
+// TestCommit checks "go-svn commit" against a real svnserve: after a
+// real "go-svn checkout", modifying an existing file, adding a new one,
+// and removing a whole subdirectory locally, then committing, the new
+// revision really exists in the repository (confirmed independently via
+// a real "svn cat"/"svn ls", not just this package's own reading code)
+// and checkoutInfoFile is updated to the new revision, so a later
+// "go-svn update" of the same directory has nothing left to bring in.
+func TestCommit(t *testing.T) {
+	requireRealSVNTools(t)
+
+	repoPath := filepath.Join(t.TempDir(), "repo")
+	if out, err := exec.Command("svnadmin", "create", repoPath).CombinedOutput(); err != nil {
+		t.Fatalf("svnadmin create: %v\n%s", err, out)
+	}
+	repoURL := "file://" + repoPath
+
+	wc := t.TempDir()
+	svnCmd := func(args ...string) {
+		t.Helper()
+		args = append([]string{"--non-interactive"}, args...)
+		cmd := exec.Command("svn", args...)
+		cmd.Dir = wc
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("svn %v: %v\n%s", args, err, out)
+		}
+	}
+	write := func(name, content string) {
+		t.Helper()
+		p := filepath.Join(wc, name)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	svnCmd("checkout", "-q", repoURL, ".")
+	write("README.md", "hello world\n")
+	write("trunk/main.go", "package main\n")
+	write("trunk/sub/nested.txt", "nested\n")
+	svnCmd("add", "-q", "README.md", "trunk")
+	svnCmd("commit", "-q", "-m", "initial commit")
+
+	dest := filepath.Join(t.TempDir(), "co")
+	var out bytes.Buffer
+	if err := run([]string{"go-svn", "checkout", repoURL, dest}, &out); err != nil {
+		t.Fatalf("checkout: %v\noutput:\n%s", err, out.String())
+	}
+
+	// Local changes: modify README.md, add a brand new file, and remove
+	// trunk/sub (a whole subdirectory) entirely.
+	if err := os.WriteFile(filepath.Join(dest, "README.md"), []byte("hello world, v2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dest, "trunk", "newfile.go"), []byte("package main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(filepath.Join(dest, "trunk", "sub")); err != nil {
+		t.Fatal(err)
+	}
+
+	out.Reset()
+	if err := run([]string{"go-svn", "commit", "-m", "local changes", dest}, &out); err != nil {
+		t.Fatalf("commit: %v\noutput:\n%s", err, out.String())
+	}
+	if !strings.Contains(out.String(), "Committed revision 2.") {
+		t.Errorf("commit output missing revision summary:\n%s", out.String())
+	}
+	for _, want := range []string{"U    README.md", "A    trunk/newfile.go", "D    trunk/sub"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("commit output missing %q:\n%s", want, out.String())
+		}
+	}
+
+	readmeOut, err := exec.Command("svn", "--non-interactive", "cat", repoURL+"/README.md").CombinedOutput()
+	if err != nil {
+		t.Fatalf("svn cat README.md: %v\n%s", err, readmeOut)
+	}
+	if string(readmeOut) != "hello world, v2\n" {
+		t.Errorf("svn cat README.md = %q, want %q", readmeOut, "hello world, v2\n")
+	}
+	newfileOut, err := exec.Command("svn", "--non-interactive", "cat", repoURL+"/trunk/newfile.go").CombinedOutput()
+	if err != nil {
+		t.Fatalf("svn cat trunk/newfile.go: %v\n%s", err, newfileOut)
+	}
+	if string(newfileOut) != "package main\n" {
+		t.Errorf("svn cat trunk/newfile.go = %q, want %q", newfileOut, "package main\n")
+	}
+	lsOut, err := exec.Command("svn", "--non-interactive", "ls", repoURL+"/trunk").CombinedOutput()
+	if err != nil {
+		t.Fatalf("svn ls trunk: %v\n%s", err, lsOut)
+	}
+	if strings.Contains(string(lsOut), "sub") {
+		t.Errorf("trunk/sub should have been deleted, still in listing:\n%s", lsOut)
+	}
+
+	info, err := readCheckoutInfo(dest)
+	if err != nil {
+		t.Fatalf("readCheckoutInfo: %v", err)
+	}
+	if info.Rev != 2 {
+		t.Errorf("checkoutInfoFile's own revision = %d, want 2", info.Rev)
+	}
+
+	t.Run("nothing to commit", func(t *testing.T) {
+		var out bytes.Buffer
+		if err := run([]string{"go-svn", "commit", "-m", "no-op", dest}, &out); err != nil {
+			t.Fatalf("commit: %v\noutput:\n%s", err, out.String())
+		}
+		if !strings.Contains(out.String(), "Nothing to commit.") {
+			t.Errorf("commit output = %q, want it to mention there was nothing to commit", out.String())
+		}
+	})
+
+	t.Run("commit without a message fails clearly", func(t *testing.T) {
+		var out bytes.Buffer
+		err := run([]string{"go-svn", "commit", dest}, &out)
+		if err == nil {
+			t.Fatalf("commit without -m succeeded, want an error")
+		}
+		if !strings.Contains(err.Error(), "requires a commit message") {
+			t.Errorf("error = %q, want it to mention a commit message is required", err.Error())
+		}
+	})
+}
+
 // TestParseArgs checks parseArgs' own option handling against the shape
 // a real "svn" subcommand accepts: "-r"/"-v" after the subcommand name
 // (not before it, which run itself enforces by only ever calling
@@ -491,13 +618,14 @@ func TestParseArgs(t *testing.T) {
 	i := func(n int) *int { return &n }
 
 	cases := []struct {
-		name                     string
-		args                     []string
-		acceptRev, acceptVerbose bool
-		wantPositional           []string
-		wantRev1, wantRev2       *int
-		wantVerbose              bool
-		wantErr                  bool
+		name                                string
+		args                                []string
+		acceptRev, acceptVerbose, acceptMsg bool
+		wantPositional                      []string
+		wantRev1, wantRev2                  *int
+		wantVerbose                         bool
+		wantMessage                         string
+		wantErr                             bool
 	}{
 		{name: "no options", args: []string{"URL"}, acceptRev: true, wantPositional: []string{"URL"}},
 		{name: "joined revision", args: []string{"-r5", "URL"}, acceptRev: true, wantPositional: []string{"URL"}, wantRev1: i(5)},
@@ -515,10 +643,14 @@ func TestParseArgs(t *testing.T) {
 		{name: "-r with a negative range end", args: []string{"-r5:-1", "URL"}, acceptRev: true, wantErr: true},
 		{name: "-r0 is a valid revision", args: []string{"-r0", "URL"}, acceptRev: true, wantPositional: []string{"URL"}, wantRev1: i(0)},
 		{name: "unknown option", args: []string{"-x", "URL"}, acceptRev: true, acceptVerbose: true, wantErr: true},
+		{name: "separate message", args: []string{"-m", "fix bug", "dir"}, acceptMsg: true, wantPositional: []string{"dir"}, wantMessage: "fix bug"},
+		{name: "joined message", args: []string{"-mfix bug", "dir"}, acceptMsg: true, wantPositional: []string{"dir"}, wantMessage: "fix bug"},
+		{name: "-m on a subcommand that doesn't accept it", args: []string{"-m", "x", "dir"}, wantErr: true},
+		{name: "-m with no argument at all", args: []string{"-m"}, acceptMsg: true, wantErr: true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			positional, rev1, rev2, verbose, err := parseArgs(c.args, c.acceptRev, c.acceptVerbose)
+			positional, rev1, rev2, verbose, message, err := parseArgs(c.args, c.acceptRev, c.acceptVerbose, c.acceptMsg)
 			if c.wantErr {
 				if err == nil {
 					t.Fatalf("parseArgs(%v) = nil error, want one", c.args)
@@ -536,6 +668,9 @@ func TestParseArgs(t *testing.T) {
 			}
 			if verbose != c.wantVerbose {
 				t.Errorf("verbose = %v, want %v", verbose, c.wantVerbose)
+			}
+			if message != c.wantMessage {
+				t.Errorf("message = %q, want %q", message, c.wantMessage)
 			}
 		})
 	}

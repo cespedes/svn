@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"crypto/md5"
 	"errors"
 	"fmt"
 	"io"
@@ -43,7 +45,7 @@ func run(args []string, stdout io.Writer) error {
 
 	switch cmdName {
 	case "info":
-		positional, lrev1, lrev2, _, err := parseArgs(rest, true, false)
+		positional, lrev1, lrev2, _, _, err := parseArgs(rest, true, false, false)
 		if err != nil {
 			return err
 		}
@@ -55,7 +57,7 @@ func run(args []string, stdout io.Writer) error {
 		}
 		return svnInfo(positional[0], lrev1, stdout)
 	case "cat":
-		positional, lrev1, lrev2, _, err := parseArgs(rest, true, false)
+		positional, lrev1, lrev2, _, _, err := parseArgs(rest, true, false, false)
 		if err != nil {
 			return err
 		}
@@ -67,7 +69,7 @@ func run(args []string, stdout io.Writer) error {
 		}
 		return svnCat(positional[0], lrev1, stdout)
 	case "ls":
-		positional, lrev1, lrev2, verbose, err := parseArgs(rest, true, true)
+		positional, lrev1, lrev2, verbose, _, err := parseArgs(rest, true, true, false)
 		if err != nil {
 			return err
 		}
@@ -79,7 +81,7 @@ func run(args []string, stdout io.Writer) error {
 		}
 		return svnLs(positional[0], lrev1, verbose, stdout)
 	case "log":
-		positional, lrev1, lrev2, verbose, err := parseArgs(rest, true, true)
+		positional, lrev1, lrev2, verbose, _, err := parseArgs(rest, true, true, false)
 		if err != nil {
 			return err
 		}
@@ -88,7 +90,7 @@ func run(args []string, stdout io.Writer) error {
 		}
 		return svnLog(positional[0], lrev1, lrev2, verbose, stdout)
 	case "export":
-		positional, lrev1, lrev2, _, err := parseArgs(rest, true, false)
+		positional, lrev1, lrev2, _, _, err := parseArgs(rest, true, false, false)
 		if err != nil {
 			return err
 		}
@@ -104,7 +106,7 @@ func run(args []string, stdout io.Writer) error {
 		}
 		return svnExport(positional[0], lrev1, dest, stdout)
 	case "checkout":
-		positional, lrev1, lrev2, _, err := parseArgs(rest, true, false)
+		positional, lrev1, lrev2, _, _, err := parseArgs(rest, true, false, false)
 		if err != nil {
 			return err
 		}
@@ -120,7 +122,7 @@ func run(args []string, stdout io.Writer) error {
 		}
 		return svnCheckout(positional[0], lrev1, dest, stdout)
 	case "update":
-		positional, lrev1, lrev2, _, err := parseArgs(rest, true, false)
+		positional, lrev1, lrev2, _, _, err := parseArgs(rest, true, false, false)
 		if err != nil {
 			return err
 		}
@@ -131,6 +133,18 @@ func run(args []string, stdout io.Writer) error {
 			return errors.New("subcommand 'update' does not accept a revision range")
 		}
 		return svnUpdate(positional[0], lrev1, stdout)
+	case "commit":
+		positional, _, _, _, message, err := parseArgs(rest, false, false, true)
+		if err != nil {
+			return err
+		}
+		if len(positional) != 1 {
+			return errors.New("subcommand 'commit' takes exactly one argument (a local directory 'checkout' produced)")
+		}
+		if message == "" {
+			return errors.New("subcommand 'commit' requires a commit message: use '-m message'")
+		}
+		return svnCommit(positional[0], message, stdout)
 	default:
 		return fmt.Errorf(`unknown subcommand: '%s'
 Type 'go-svn help' for usage`, cmdName)
@@ -138,49 +152,63 @@ Type 'go-svn help' for usage`, cmdName)
 }
 
 // parseArgs scans args (everything after the subcommand name) for "-r"/
-// "-v" options mixed in among positional arguments, the same way a real
-// "svn" subcommand accepts them -- e.g. "svn cat -r5 URL" or
+// "-v"/"-m" options mixed in among positional arguments, the same way a
+// real "svn" subcommand accepts them -- e.g. "svn cat -r5 URL" or
 // "svn cat URL -r5", not just options before the subcommand name.
-// acceptRev/acceptVerbose report whether this particular subcommand
-// accepts "-r"/"-v" at all: passing one it doesn't is reported as an
-// error here, the same way a real "svn" subcommand rejects an option it
-// doesn't support, rather than silently ignored. "-r" takes its value
-// either joined ("-r5", "-r5:6") or as a separate argument ("-r 5",
-// "-r 5:6"); "-v" takes no value.
-func parseArgs(args []string, acceptRev, acceptVerbose bool) (positional []string, rev1, rev2 *int, verbose bool, err error) {
+// acceptRev/acceptVerbose/acceptMessage report whether this particular
+// subcommand accepts "-r"/"-v"/"-m" at all: passing one it doesn't is
+// reported as an error here, the same way a real "svn" subcommand
+// rejects an option it doesn't support, rather than silently ignored.
+// "-r"/"-m" each take their value either joined ("-r5", "-mfix bug") or
+// as a separate argument ("-r 5", "-m fix bug"); "-v" takes no value.
+func parseArgs(args []string, acceptRev, acceptVerbose, acceptMessage bool) (positional []string, rev1, rev2 *int, verbose bool, message string, err error) {
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		switch {
 		case arg == "-r":
 			if !acceptRev {
-				return nil, nil, nil, false, fmt.Errorf("this subcommand does not accept option '-r'")
+				return nil, nil, nil, false, "", fmt.Errorf("this subcommand does not accept option '-r'")
 			}
 			i++
 			if i >= len(args) {
-				return nil, nil, nil, false, errors.New("option '-r' expects an argument")
+				return nil, nil, nil, false, "", errors.New("option '-r' expects an argument")
 			}
 			if rev1, rev2, err = parseRevArg(args[i]); err != nil {
-				return nil, nil, nil, false, err
+				return nil, nil, nil, false, "", err
 			}
 		case strings.HasPrefix(arg, "-r") && arg != "-r":
 			if !acceptRev {
-				return nil, nil, nil, false, fmt.Errorf("this subcommand does not accept option '-r'")
+				return nil, nil, nil, false, "", fmt.Errorf("this subcommand does not accept option '-r'")
 			}
 			if rev1, rev2, err = parseRevArg(strings.TrimPrefix(arg, "-r")); err != nil {
-				return nil, nil, nil, false, err
+				return nil, nil, nil, false, "", err
 			}
 		case arg == "-v":
 			if !acceptVerbose {
-				return nil, nil, nil, false, fmt.Errorf("this subcommand does not accept option '-v'")
+				return nil, nil, nil, false, "", fmt.Errorf("this subcommand does not accept option '-v'")
 			}
 			verbose = true
+		case arg == "-m":
+			if !acceptMessage {
+				return nil, nil, nil, false, "", fmt.Errorf("this subcommand does not accept option '-m'")
+			}
+			i++
+			if i >= len(args) {
+				return nil, nil, nil, false, "", errors.New("option '-m' expects an argument")
+			}
+			message = args[i]
+		case strings.HasPrefix(arg, "-m") && arg != "-m":
+			if !acceptMessage {
+				return nil, nil, nil, false, "", fmt.Errorf("this subcommand does not accept option '-m'")
+			}
+			message = strings.TrimPrefix(arg, "-m")
 		case strings.HasPrefix(arg, "-") && arg != "-":
-			return nil, nil, nil, false, fmt.Errorf("unknown option: %s", arg)
+			return nil, nil, nil, false, "", fmt.Errorf("unknown option: %s", arg)
 		default:
 			positional = append(positional, arg)
 		}
 	}
-	return positional, rev1, rev2, verbose, nil
+	return positional, rev1, rev2, verbose, message, nil
 }
 
 // parseRevArg parses s -- the value following "-r", or the remainder of
@@ -602,6 +630,350 @@ func svnUpdate(dest string, lrev *int, stdout io.Writer) error {
 	return nil
 }
 
+// remoteChildKinds lists the direct children of svnPath (at rev) in the
+// repository, keyed by their own bare name and mapping to "dir" or
+// "file" -- the same self-entry filtering and repository-root-relative-
+// to-bare-name stripping svnExport's own exportDir needs (see
+// repoRootRelativePath), just against a single, concrete revision
+// rather than exportDir's own "latest if nil" one, since svnCommit
+// always compares against the checkout's own known base revision.
+func remoteChildKinds(c *svn.Client, svnPath, anchor string, rev int) (map[string]string, error) {
+	entries, err := c.List(svnPath, &rev, "immediates", []string{"kind"})
+	if err != nil {
+		return nil, err
+	}
+	fullDirPath := joinNonEmpty(anchor, svnPath)
+	selfPath := "/" + fullDirPath
+	kinds := map[string]string{}
+	for _, entry := range entries {
+		if entry.Path == selfPath {
+			continue
+		}
+		name := strings.TrimPrefix(entry.Path, "/")
+		if fullDirPath != "" {
+			name = strings.TrimPrefix(name, fullDirPath+"/")
+		}
+		if name == "" {
+			continue
+		}
+		kinds[name] = entry.Kind
+	}
+	return kinds, nil
+}
+
+// localChildKinds lists localDir's own direct entries, keyed by name and
+// mapping to "dir" or "file" (anything that isn't a directory is treated
+// as a plain file), skipping checkoutInfoFile -- the sidecar bookkeeping
+// file svnCommit must never treat as repository content.
+func localChildKinds(localDir string) (map[string]string, error) {
+	entries, err := os.ReadDir(localDir)
+	if err != nil {
+		return nil, err
+	}
+	kinds := map[string]string{}
+	for _, entry := range entries {
+		if entry.Name() == checkoutInfoFile {
+			continue
+		}
+		if entry.IsDir() {
+			kinds[entry.Name()] = "dir"
+		} else {
+			kinds[entry.Name()] = "file"
+		}
+	}
+	return kinds, nil
+}
+
+// checksum returns content's MD5 checksum as the lowercase hex string
+// EditorWriter.ApplyTextdelta/CloseFile expect.
+func checksum(content []byte) []byte {
+	return []byte(fmt.Sprintf("%x", md5.Sum(content)))
+}
+
+// commitChange is one child node svnCommit's own tree comparison found
+// needing description to the server: a brand new node ("add"), a
+// removed one ("delete"), a modified file's new content ("modify"), or
+// an existing, unmodified-itself directory that still needs opening
+// because something changed somewhere inside it ("visit"). children
+// holds nested commitChanges for an "add"ed or "visit"ed directory;
+// planDir/planNewTree never produce an entry for a node that turned out
+// entirely unchanged, so a "visit" node's own children is never empty
+// (planDir only ever emits "visit" for a subdirectory whose nested plan
+// came back non-empty).
+type commitChange struct {
+	name         string
+	isDir        bool
+	action       string // "add", "delete", "modify", "visit"
+	content      []byte // new content, for "add"/"modify" of a file
+	baseChecksum []byte // remote content's own checksum, for "modify"
+	openRev      int    // revision to OpenDir/OpenFile at, for "modify"/"visit"
+	children     []commitChange
+}
+
+// planNewTree walks localDir -- entirely new, nothing on the server
+// side to compare against -- describing every file and subdirectory
+// inside it as "add", recursively.
+func planNewTree(localDir string) ([]commitChange, error) {
+	kinds, err := localChildKinds(localDir)
+	if err != nil {
+		return nil, err
+	}
+	var changes []commitChange
+	for name, kind := range kinds {
+		childLocal := filepath.Join(localDir, name)
+		if kind == "dir" {
+			children, err := planNewTree(childLocal)
+			if err != nil {
+				return nil, err
+			}
+			changes = append(changes, commitChange{name: name, isDir: true, action: "add", children: children})
+		} else {
+			content, err := os.ReadFile(childLocal)
+			if err != nil {
+				return nil, err
+			}
+			changes = append(changes, commitChange{name: name, action: "add", content: content})
+		}
+	}
+	return changes, nil
+}
+
+// addChange builds the commitChange for a brand new node named name,
+// found locally at childLocal -- a directory's own content is described
+// via planNewTree.
+func addChange(name, localKind, childLocal string) (commitChange, error) {
+	if localKind == "dir" {
+		children, err := planNewTree(childLocal)
+		if err != nil {
+			return commitChange{}, err
+		}
+		return commitChange{name: name, isDir: true, action: "add", children: children}, nil
+	}
+	content, err := os.ReadFile(childLocal)
+	if err != nil {
+		return commitChange{}, err
+	}
+	return commitChange{name: name, action: "add", content: content}, nil
+}
+
+// planDir compares localDir (a directory an earlier "checkout"/"update"
+// produced) against the repository's own directory at wirePath (as of
+// rev, the checkout's own base revision -- svnCommit only supports
+// committing against a single, uniform base, the same limitation every
+// other single-revision operation in this package has), returning one
+// commitChange per child that needs describing to the server. A child
+// present, unchanged, and of the same kind on both sides is left out
+// entirely -- including a directory whose own contents didn't change --
+// so an untouched subtree is never even opened on the wire.
+//
+// Unlike a real "svn commit", there is no staged add/remove/schedule
+// step at all: this simply compares the two trees and sends whatever
+// differs, matching this package's broader "no working-copy metadata"
+// stance (see checkoutInfoFile's own doc comment). A file dropped into
+// dest by any means, not just "checkout"/"update", is committed as a
+// new addition the same way an svn client's own "svn add"ed file would
+// be.
+func planDir(c *svn.Client, localDir, wirePath, anchor string, rev int) ([]commitChange, error) {
+	remoteKinds, err := remoteChildKinds(c, wirePath, anchor, rev)
+	if err != nil {
+		return nil, err
+	}
+	localKinds, err := localChildKinds(localDir)
+	if err != nil {
+		return nil, err
+	}
+
+	names := map[string]bool{}
+	for name := range remoteKinds {
+		names[name] = true
+	}
+	for name := range localKinds {
+		names[name] = true
+	}
+
+	var changes []commitChange
+	for name := range names {
+		localKind, hasLocal := localKinds[name]
+		remoteKind, hasRemote := remoteKinds[name]
+		childLocal := filepath.Join(localDir, name)
+		childWire := joinNonEmpty(wirePath, name)
+
+		switch {
+		case !hasRemote:
+			change, err := addChange(name, localKind, childLocal)
+			if err != nil {
+				return nil, err
+			}
+			changes = append(changes, change)
+		case !hasLocal:
+			changes = append(changes, commitChange{name: name, isDir: remoteKind == "dir", action: "delete"})
+		case localKind != remoteKind:
+			// The old node must be deleted before the new one of a
+			// different kind can be added in its place -- see
+			// EditorWriter.DeleteEntry's own doc comment.
+			changes = append(changes, commitChange{name: name, isDir: remoteKind == "dir", action: "delete"})
+			change, err := addChange(name, localKind, childLocal)
+			if err != nil {
+				return nil, err
+			}
+			changes = append(changes, change)
+		case localKind == "dir":
+			nested, err := planDir(c, childLocal, childWire, anchor, rev)
+			if err != nil {
+				return nil, err
+			}
+			if len(nested) > 0 {
+				changes = append(changes, commitChange{name: name, isDir: true, action: "visit", openRev: rev, children: nested})
+			}
+		default:
+			localContent, err := os.ReadFile(childLocal)
+			if err != nil {
+				return nil, err
+			}
+			_, remoteContent, err := c.GetFile(childWire, &rev, false, true)
+			if err != nil {
+				return nil, err
+			}
+			if !bytes.Equal(localContent, remoteContent) {
+				changes = append(changes, commitChange{
+					name: name, action: "modify", content: localContent,
+					baseChecksum: checksum(remoteContent), openRev: rev,
+				})
+			}
+		}
+	}
+	return changes, nil
+}
+
+// emitChanges drives e to describe every change in changes -- and,
+// recursively, everything nested under an "add"ed or "visit"ed
+// directory -- printing one "A"/"D"/"U" status line per file or
+// directory touched, the same letters diskEditor already prints for
+// checkout/update.
+func emitChanges(e *svn.EditorWriter, changes []commitChange, wirePath string, stdout io.Writer) error {
+	for _, ch := range changes {
+		childWire := joinNonEmpty(wirePath, ch.name)
+		switch ch.action {
+		case "delete":
+			if err := e.DeleteEntry(childWire, nil); err != nil {
+				return err
+			}
+			fmt.Fprintf(stdout, "D    %s\n", childWire)
+		case "add":
+			if ch.isDir {
+				if err := e.AddDir(childWire, nil); err != nil {
+					return err
+				}
+				fmt.Fprintf(stdout, "A    %s\n", childWire)
+				if err := emitChanges(e, ch.children, childWire, stdout); err != nil {
+					return err
+				}
+				if err := e.CloseDir(); err != nil {
+					return err
+				}
+			} else {
+				if err := e.AddFile(childWire, nil); err != nil {
+					return err
+				}
+				if err := e.ApplyTextdelta(ch.content, nil); err != nil {
+					return err
+				}
+				if err := e.CloseFile(checksum(ch.content)); err != nil {
+					return err
+				}
+				fmt.Fprintf(stdout, "A    %s\n", childWire)
+			}
+		case "modify":
+			if err := e.OpenFile(childWire, uint(ch.openRev)); err != nil {
+				return err
+			}
+			if err := e.ApplyTextdelta(ch.content, ch.baseChecksum); err != nil {
+				return err
+			}
+			if err := e.CloseFile(checksum(ch.content)); err != nil {
+				return err
+			}
+			fmt.Fprintf(stdout, "U    %s\n", childWire)
+		case "visit":
+			if err := e.OpenDir(childWire, uint(ch.openRev)); err != nil {
+				return err
+			}
+			if err := emitChanges(e, ch.children, childWire, stdout); err != nil {
+				return err
+			}
+			if err := e.CloseDir(); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// svnCommit sends every local change under dest (a directory an earlier
+// "go-svn checkout" produced) back to the repository as a new revision,
+// using dest's own checkoutInfoFile to know both the repository URL and
+// the base revision to compare against -- like "go-svn update", only a
+// single, uniform base revision is supported, not a "mixed revision"
+// working copy. Unlike checkout/update, which drive svn.Client through
+// a real report/editor exchange, there is no report here at all: the
+// whole tree of changes is built up front by comparing dest's own
+// current content (planDir/planNewTree) against the repository at that
+// base revision, into a []svn.Item via svn.EditorWriter (the same
+// builder svn.Server's own FinishReport callbacks use server-side, just
+// handed to svn.Client.Commit instead of returned from a callback), then
+// sent in a single call.
+func svnCommit(dest string, message string, stdout io.Writer) error {
+	info, err := readCheckoutInfo(dest)
+	if err != nil {
+		return err
+	}
+
+	c, err := svn.Connect(info.URL)
+	if err != nil {
+		return err
+	}
+
+	anchor, err := repoRootRelativePath(c, info.URL)
+	if err != nil {
+		return err
+	}
+
+	changes, err := planDir(c, dest, "", anchor, info.Rev)
+	if err != nil {
+		return err
+	}
+	if len(changes) == 0 {
+		fmt.Fprintln(stdout, "Nothing to commit.")
+		return nil
+	}
+
+	e := svn.NewEditorWriter()
+	if err := e.OpenRoot(nil); err != nil {
+		return err
+	}
+	if err := emitChanges(e, changes, "", stdout); err != nil {
+		return err
+	}
+	if err := e.CloseDir(); err != nil {
+		return err
+	}
+	items, err := e.Items()
+	if err != nil {
+		return err
+	}
+
+	result, err := c.Commit(message, items)
+	if err != nil {
+		return err
+	}
+
+	if err := writeCheckoutInfo(dest, checkoutInfo{URL: info.URL, Rev: result.Rev}); err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "Committed revision %d.\n", result.Rev)
+	return nil
+}
+
 // diskEditor returns an svn.Editor that creates, modifies and removes
 // real files/directories under dest to match whatever
 // svn.Client.Checkout/Update describes, printing one status line per
@@ -800,6 +1172,7 @@ Available subcommands:
    export [-r rev] <repo> [localdir]
    checkout [-r rev] <repo> [localdir]
    update [-r rev] <localdir>
+   commit -m message <localdir>
 
 go-svn is a client for the Subversion protocol.`)
 }
