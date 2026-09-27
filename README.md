@@ -13,11 +13,12 @@ a subset of ra_svn, described in detail below.
 ## Protocol coverage
 
 This package implements the **read-only, unversioned-property, non-locking**
-part of ra_svn: browsing and reading a repository at a given revision, plus
-serving a plain `svn checkout` or a single-revision `svn update`/`svn diff`/
-`svn switch` (`svn.Server` only -- see below). It does not implement commits,
-a mixed-revision `update`/`diff`/`switch` (and so nothing that depends on
-that kind of thing, like `blame`), locking, or revision properties. There is
+part of ra_svn: browsing and reading a repository at a given revision, plus a
+plain `svn checkout` (both sides -- see below) and, `svn.Server`-side only,
+serving a single-revision `svn update`/`svn diff`/`svn switch`. It does not
+implement commits, a mixed-revision `update`/`diff`/`switch` (and so nothing
+that depends on that kind of thing, like `blame`), locking, or revision
+properties. There is
 no support for `svn://`'s raw TCP transport (only `file://` and `svn+ssh://`,
 which both exec `svnserve -t` — see below) or for the HTTP-based (DAV)
 protocol, and the only auth mechanisms implemented are `ANONYMOUS` and
@@ -38,7 +39,8 @@ of this same table):
 | `ls` | ✅ | `List`; only "immediates" depth has been exercised — recursive listing depends on the server understanding other `depth` values, which `List` merely passes through |
 | `log` | ✅ | `Log`, including `-r`/revision ranges |
 | `export` | ✅ | recursive `List` + `GetFile` walk (`go-svn export <repo> [localdir]`), no report/editor exchange needed since it doesn't create a working copy |
-| `checkout` / `update` / `switch` | ❌ | needs the report/editor exchange, not implemented on the client side |
+| `checkout` | ✅ for a plain checkout | `Client.Checkout` drives the same report/editor exchange the server side uses, reporting "I have nothing" and then parsing the resulting Editor Command Set sequence to create files/directories under a destination directory -- no ".svn" working-copy metadata, so a real `svn update`/`status` can't later run against the result (matching `export`'s own simplification). To check out a repository subdirectory, `Connect`/`NewClient` to that subdirectory's own URL directly; `Checkout` has no separate "path within the repository" parameter (see its own doc comment for why) |
+| `update` / `switch` | ❌ | needs a real (non-start-empty) report describing an existing working copy, which `Checkout`'s own report/editor plumbing doesn't build yet |
 | `diff` / `blame` (`praise`) | ❌ | needs `update`/`get-file-revs`, neither implemented |
 | `propget` / `proplist` on a file | partial | `GetFile`'s properties are returned if requested; there's no dedicated single-property call |
 | `propget` / `proplist` on a directory | ❌ | |
@@ -60,7 +62,9 @@ of this same table):
 In practice: a real `svn info`/`ls`/`cat`/`log`/`checkout`/`update`/`diff`/`switch`
 against a `svn.Server` implementation works (confirmed against a real `svn`
 client — see [Development](#development)), as long as the working copy
-isn't "mixed revision"; `svn commit` does not.
+isn't "mixed revision"; `svn commit` does not. In the other direction,
+`svn.Client.Checkout` works against a real `svnserve` the same way (confirmed
+in `svn_integration_test.go`).
 
 ## Installation
 

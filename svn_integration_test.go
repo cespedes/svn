@@ -267,3 +267,118 @@ func TestClientAgainstRealSVNServer(t *testing.T) {
 		}
 	})
 }
+
+// TestClientCheckout drives Client.Checkout against a real svnserve,
+// which is what actually exercises the report/editor exchange it sends
+// and the Editor Command Set sequence it then parses -- neither of which
+// this package's own Server ever had to (it only ever produces that
+// sequence, via EditorWriter, never consumes one), so a synthetic/
+// in-memory server couldn't stand in for a real one here.
+func TestClientCheckout(t *testing.T) {
+	repoURL := newRealRepo(t)
+	c, err := svn.Connect(repoURL)
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+
+	t.Run("plain checkout at the latest revision", func(t *testing.T) {
+		dir := filepath.Join(t.TempDir(), "wc")
+		rev, err := c.Checkout(nil, dir)
+		if err != nil {
+			t.Fatalf("Checkout: %v", err)
+		}
+		if rev != 3 {
+			t.Errorf("Checkout() rev = %d, want 3", rev)
+		}
+
+		readme, err := os.ReadFile(filepath.Join(dir, "README.md"))
+		if err != nil {
+			t.Fatalf("reading README.md: %v", err)
+		}
+		if string(readme) != "hello world, v2\n" {
+			t.Errorf("README.md = %q, want %q", readme, "hello world, v2\n")
+		}
+		mainGo, err := os.ReadFile(filepath.Join(dir, "trunk", "main.go"))
+		if err != nil {
+			t.Fatalf("reading trunk/main.go: %v", err)
+		}
+		if string(mainGo) != "package main\n" {
+			t.Errorf("trunk/main.go = %q, want %q", mainGo, "package main\n")
+		}
+		nested, err := os.ReadFile(filepath.Join(dir, "trunk", "sub", "nested.txt"))
+		if err != nil {
+			t.Fatalf("reading trunk/sub/nested.txt: %v", err)
+		}
+		if string(nested) != "nested\n" {
+			t.Errorf("trunk/sub/nested.txt = %q, want %q", nested, "nested\n")
+		}
+		mainCopy, err := os.ReadFile(filepath.Join(dir, "trunk", "main_copy.go"))
+		if err != nil {
+			t.Fatalf("reading trunk/main_copy.go: %v", err)
+		}
+		if string(mainCopy) != "package main\n" {
+			t.Errorf("trunk/main_copy.go = %q, want %q", mainCopy, "package main\n")
+		}
+	})
+
+	t.Run("checkout at an older revision", func(t *testing.T) {
+		dir := filepath.Join(t.TempDir(), "wc")
+		rev1 := 1
+		rev, err := c.Checkout(&rev1, dir)
+		if err != nil {
+			t.Fatalf("Checkout: %v", err)
+		}
+		if rev != 1 {
+			t.Errorf("Checkout() rev = %d, want 1", rev)
+		}
+
+		readme, err := os.ReadFile(filepath.Join(dir, "README.md"))
+		if err != nil {
+			t.Fatalf("reading README.md: %v", err)
+		}
+		if string(readme) != "hello world\n" {
+			t.Errorf("README.md = %q, want %q (r1's own content, not r2's)", readme, "hello world\n")
+		}
+		// trunk/main_copy.go was only added in r3: it must not exist in a
+		// checkout of r1.
+		if _, err := os.Stat(filepath.Join(dir, "trunk", "main_copy.go")); err == nil {
+			t.Errorf("trunk/main_copy.go should not exist in a checkout of r1")
+		}
+	})
+
+	t.Run("checkout of a repository subdirectory", func(t *testing.T) {
+		// A subdirectory checkout needs its own session anchored right
+		// at "trunk" -- see Checkout's own doc comment for why it has
+		// no separate "path within the repository" parameter.
+		c2, err := svn.Connect(repoURL + "/trunk")
+		if err != nil {
+			t.Fatalf("Connect: %v", err)
+		}
+		dir := filepath.Join(t.TempDir(), "wc")
+		rev, err := c2.Checkout(nil, dir)
+		if err != nil {
+			t.Fatalf("Checkout: %v", err)
+		}
+		if rev != 3 {
+			t.Errorf("Checkout() rev = %d, want 3", rev)
+		}
+		mainGo, err := os.ReadFile(filepath.Join(dir, "main.go"))
+		if err != nil {
+			t.Fatalf("reading main.go: %v", err)
+		}
+		if string(mainGo) != "package main\n" {
+			t.Errorf("main.go = %q, want %q", mainGo, "package main\n")
+		}
+		if _, err := os.Stat(filepath.Join(dir, "README.md")); err == nil {
+			t.Errorf("README.md (a sibling of trunk, not under it) should not have been checked out")
+		}
+	})
+
+	t.Run("Checkout after other commands on the same connection", func(t *testing.T) {
+		// If an earlier subtest's Checkout left the connection desynced,
+		// this would fail (or hang).
+		if _, err := c.GetLatestRev(); err != nil {
+			t.Fatalf("GetLatestRev after Checkout: %v", err)
+		}
+	})
+}
