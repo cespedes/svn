@@ -167,36 +167,26 @@ incremental delta *against that base* rather than a full replacement —
 
 A real `svn checkout`, single-revision `svn update`/`svn diff`, and
 single-revision `svn switch` all work end to end against a `svn.Server`
-implementation. There is currently **no way for a `Server` to receive a
-commit**: nothing in this package's `Server` API models accepting an
-incoming, client-driven Editor Command Set, deciding what "committing" it
-means against a backing store, or reporting back a new revision. Building
-this would need:
+implementation. `Serve` can now also *receive* a commit driven by this
+package's own `Client`, via `Server.Commit(logMessage string, revprops
+[]PropList) (Editor, error)` (called when `"commit"` arrives, returning
+the `Editor` whose fields `Serve` calls as it parses the client-driven
+Editor Command Set that follows -- reusing `driveEditor` unchanged, in
+the reverse direction from every other use) and `Server.FinishCommit()
+(CommitInfo, error)` (called once the client's own `close-edit` is
+received, to report the new revision back). Two things remain open:
 
-- ~~Generalizing `driveEditor`/`Editor` to read from a `*conn` directly~~
-  **done**: `driveEditor` is now a package-level function taking a
-  `*conn`, not a `*Client` method, and stops right after acking
-  `close-edit`/`abort-edit` rather than also reading `finish-report`'s
-  own deferred response itself -- that response's shape is specific to
-  whichever Main Command Set command started the exchange
-  (`finish-report` for an update/diff/switch, `commit` for a commit), so
-  reading (or, server-side, writing) it is the caller's own job now
-  (`reportAndApply` does the reading, client-side). The wire format is
-  the same regardless of direction, so the same reader and callback
-  shape already serves a client parsing a server-driven edit, and is
-  ready to serve a server parsing a client-driven one the same way.
-- ~~New `Server` callbacks mirroring the existing `Update` + `FinishReport`
-  split~~ **done**: `Server.Commit(logMessage string, revprops []PropList)
-  (Editor, error)`, invoked when `"commit"` arrives (to let an
-  implementation open its own transaction and return the `Editor` to
-  drive), and `Server.FinishCommit() (CommitInfo, error)`, invoked once
-  the client's `close-edit` is received, to report back the new revision.
-  Neither is wired into `Serve`'s own dispatch switch yet -- there's
-  still no `"commit"` case at all, so this alone changes nothing a real
-  client can observe.
-- Deciding where a commit's author identity comes from: `Server` today
-  only distinguishes `ANONYMOUS`/`EXTERNAL` at the transport level, with
-  no existing per-connection "who is this" concept.
+- **Author identity.** A real commit's `CommitInfo.Author` comes from
+  the authenticated user, but `Server` today only distinguishes
+  `ANONYMOUS`/`EXTERNAL` at the transport level, with no per-connection
+  "who is this" concept -- left to whatever `FinishCommit`'s own
+  implementation closes over (e.g. something `Greet` recorded).
+- **Validation against a real `svn commit`.** Everything above is
+  confirmed end to end only against this package's own `Client`/
+  `EditorWriter` so far. A real client's own commit may hit the same
+  `ANONYMOUS`-then-`EXTERNAL`-reauth problem `Client.Commit`'s own wire
+  capture did (see "Client: driving and parsing the Editor Command Set"
+  above) -- not yet confirmed either way.
 
 ## Wire-level conventions
 

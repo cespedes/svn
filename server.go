@@ -365,6 +365,8 @@ func (s *Server) Serve(r io.Reader, w io.Writer) error {
 			err = s.handleSetPath(conn, command.Params, &report)
 		case "finish-report": // From the Report Command Set
 			err = s.handleFinishReport(conn, &report)
+		case "commit":
+			err = s.handleCommit(conn, command.Params)
 		default:
 			err = conn.WriteFailure(Error{
 				AprErr:  210001,
@@ -895,6 +897,100 @@ func (s *Server) handleFinishReport(conn conn, report *[]ReportedPath) error {
 		return err
 	}
 	return conn.WriteSuccess([]any{})
+}
+
+// handleCommit answers a "commit" command: parses the log message and
+// revision properties, calls Server.Commit to get the Editor to drive,
+// then reads and parses the client-driven Editor Command Set that
+// follows via the same driveEditor reader Client.Checkout/Update/Diff
+// already use to parse a server-driven one -- the wire format is the
+// same regardless of direction (see driveEditor's own doc comment).
+// Once the client's own close-edit is acked, Server.FinishCommit reports
+// the outcome, sent back as the deferred response to the original
+// "commit" -- confirmed by real wire capture to be sent bare, without a
+// "( success ( ... ) )" envelope around it, unlike every other command's
+// response (see Client.Commit's own doc comment, which parses this same
+// shape back).
+func (s *Server) handleCommit(conn conn, params Item) error {
+	if s.Commit == nil || s.FinishCommit == nil {
+		return replyUnimplemented(conn, "commit")
+	}
+	var args struct {
+		LogMessage []byte
+		LockTokens Item // ignored: no locking support anywhere in this package
+		KeepLocks  bool
+		Revprops   []PropList
+	}
+	if err := Unmarshal(params, &args); err != nil {
+		return conn.WriteFailure(errMalformedNetworkData)
+	}
+
+	editor, err := s.Commit(string(args.LogMessage), args.Revprops)
+	if err != nil {
+		return conn.WriteFailure(err)
+	}
+	// empty auth-request, then the real ack meaning "go ahead and stream
+	// the edit" -- confirmed by real wire capture.
+	if err := conn.WriteSuccess([]any{[]any{}, []byte{}}); err != nil {
+		return err
+	}
+	if err := conn.WriteSuccess([]any{}); err != nil {
+		return err
+	}
+
+	_, aborted, err := driveEditor(&conn, editor)
+	if err != nil {
+		return err
+	}
+	if aborted {
+		// Not confirmed against a real client, which has no reason to
+		// abort its own commit -- but the protocol gives a client this
+		// option (abort-edit, not just close-edit) just as it does a
+		// server, so this is handled defensively rather than left to
+		// hang: there is no successful CommitInfo to report, so the
+		// "commit" command's own deferred response is a failure
+		// instead.
+		if err := conn.WriteSuccess([]any{[]any{}, []byte{}}); err != nil {
+			return err
+		}
+		return conn.WriteFailure(errors.New("commit aborted by client"))
+	}
+
+	info, err := s.FinishCommit()
+	if err != nil {
+		return conn.WriteFailure(err)
+	}
+	// empty auth-request for the deferred "commit" response, then the
+	// commit-info tuple itself, sent bare (no success/failure envelope)
+	// -- confirmed by real wire capture. Built by hand, not via generic
+	// Marshal(info): a plain Go string field (Date/Author/PostCommitErr)
+	// marshals as a bare word by default, but the wire shape needs each
+	// one wrapped as its own "[ x:string ]" optional group, sent as a
+	// StringType -- the same class of fix ChangedPath already needed,
+	// for the same reason (see "log"'s own case).
+	if err := conn.WriteSuccess([]any{[]any{}, []byte{}}); err != nil {
+		return err
+	}
+	return conn.Write([]any{
+		info.Rev,
+		optionalStringField(info.Date),
+		optionalStringField(info.Author),
+		optionalStringField(info.PostCommitErr),
+	})
+}
+
+// optionalStringField wraps s as a "[ x:string ]" optional wire value:
+// absent (an empty list) if s is empty, present (as a StringType)
+// otherwise -- the convention CommitInfo's own Date/Author/
+// PostCommitErr fields use for "the server didn't report this", unlike
+// EditorWriter's own optionalString (nil vs. non-nil []byte, a
+// different distinction, used where an empty-but-present value is
+// meaningful on its own, e.g. a property set to the empty string).
+func optionalStringField(s string) []any {
+	if s == "" {
+		return []any{}
+	}
+	return []any{[]byte(s)}
 }
 
 func replyUnimplemented(conn conn, cmd string) error {

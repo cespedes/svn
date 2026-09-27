@@ -54,6 +54,254 @@ func TestServerDebug(t *testing.T) {
 // Server.SetPath are actually called with the parsed command arguments.
 // They used to be checked for nil (to decide whether to reply
 // "unimplemented") but never invoked.
+// TestServerCommit drives a full round trip through this package's own
+// Client and Server: Client.Commit sends an Editor Command Set built
+// with EditorWriter (adding a directory and a file, then deleting an
+// unrelated existing one), and Server.Commit/FinishCommit -- backed by
+// a small in-memory tree, standing in for whatever a real backing store
+// would do -- receive it via the same driveEditor reader
+// Client.Checkout/Update/Diff already use to parse a server-driven
+// edit, confirming it works the same regardless of direction.
+func TestServerCommit(t *testing.T) {
+	clientSide, serverSide := net.Pipe()
+	defer clientSide.Close()
+
+	type node struct {
+		isDir   bool
+		content []byte
+	}
+	tree := map[string]*node{
+		"":              {isDir: true},
+		"trunk/old.txt": {content: []byte("stale\n")},
+	}
+	var gotLogMessage string
+	var gotRevprops []PropList
+
+	var server Server
+	server.Commit = func(logMessage string, revprops []PropList) (Editor, error) {
+		gotLogMessage = logMessage
+		gotRevprops = revprops
+		editor := Editor{
+			AddDir: func(path string, copyFrom *EditorCopyFrom) error {
+				tree[path] = &node{isDir: true}
+				return nil
+			},
+			AddFile: func(path string, copyFrom *EditorCopyFrom) error {
+				tree[path] = &node{}
+				return nil
+			},
+			CloseFile: func(path string, content []byte) error {
+				tree[path].content = content
+				return nil
+			},
+			DeleteEntry: func(path string, rev *int) error {
+				delete(tree, path)
+				return nil
+			},
+		}
+		return editor, nil
+	}
+	server.FinishCommit = func() (CommitInfo, error) {
+		return CommitInfo{Rev: 42, Date: "2024-01-01T00:00:00.000000Z", Author: "tester"}, nil
+	}
+
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- server.Serve(serverSide, serverSide) }()
+
+	c, err := NewClient(clientSide, clientSide, "svn+ssh://example.com/repo")
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	e := NewEditorWriter()
+	if err := e.OpenRoot(nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.AddDir("trunk", nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.AddFile("trunk/main.go", nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.ApplyTextdelta([]byte("package main\n"), nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.CloseFile(nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.DeleteEntry("trunk/old.txt", nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.CloseDir(); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.CloseDir(); err != nil {
+		t.Fatal(err)
+	}
+	items, err := e.Items()
+	if err != nil {
+		t.Fatalf("Items: %v", err)
+	}
+
+	info, err := c.Commit("test commit", items)
+	if err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	if info.Rev != 42 || info.Author != "tester" || info.Date != "2024-01-01T00:00:00.000000Z" {
+		t.Errorf("Commit() = %+v, want Rev=42 Author=tester Date=2024-01-01T00:00:00.000000Z", info)
+	}
+
+	if gotLogMessage != "test commit" {
+		t.Errorf("Server.Commit's own logMessage = %q, want %q", gotLogMessage, "test commit")
+	}
+	foundLog := false
+	for _, p := range gotRevprops {
+		if p.Name == "svn:log" {
+			foundLog = true
+			if p.Value != "test commit" {
+				t.Errorf("svn:log revprop = %q, want %q", p.Value, "test commit")
+			}
+		}
+	}
+	if !foundLog {
+		t.Errorf("revprops missing svn:log: %+v", gotRevprops)
+	}
+
+	if tree["trunk"] == nil || !tree["trunk"].isDir {
+		t.Errorf("trunk not recorded as a directory: %+v", tree["trunk"])
+	}
+	if got := tree["trunk/main.go"]; got == nil || string(got.content) != "package main\n" {
+		t.Errorf("trunk/main.go = %+v, want content %q", got, "package main\n")
+	}
+	if _, ok := tree["trunk/old.txt"]; ok {
+		t.Errorf("trunk/old.txt should have been deleted")
+	}
+
+	clientSide.Close()
+	if err := <-serveErr; err != io.EOF {
+		t.Fatalf("Serve: %v", err)
+	}
+}
+
+// TestServerCommitUnimplemented checks that "commit" replies
+// "unimplemented" (rather than, say, panicking on a nil Editor) when
+// Server.Commit/FinishCommit aren't set, the same way every other
+// nil-able callback field does.
+func TestServerCommitUnimplemented(t *testing.T) {
+	clientSide, serverSide := net.Pipe()
+	defer clientSide.Close()
+
+	var server Server
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- server.Serve(serverSide, serverSide) }()
+
+	c, err := NewClient(clientSide, clientSide, "svn+ssh://example.com/repo")
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	e := NewEditorWriter()
+	if err := e.OpenRoot(nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.CloseDir(); err != nil {
+		t.Fatal(err)
+	}
+	items, err := e.Items()
+	if err != nil {
+		t.Fatalf("Items: %v", err)
+	}
+
+	if _, err := c.Commit("test commit", items); err == nil {
+		t.Fatalf("Commit succeeded against a Server with no Commit callback, want an error")
+	}
+
+	clientSide.Close()
+	<-serveErr
+}
+
+// TestServerCommitAbortEdit checks the defensive, not confirmed against
+// a real client, path: if the client sends "abort-edit" instead of
+// "close-edit", Serve acks it the same way (an empty success, exactly
+// like driveEditor already does for the read direction) and reports the
+// "commit" command's own deferred response as a failure, rather than
+// hanging or calling FinishCommit as if the edit had completed
+// successfully.
+func TestServerCommitAbortEdit(t *testing.T) {
+	clientSide, serverSide := net.Pipe()
+	defer clientSide.Close()
+
+	finishCommitCalled := false
+	var server Server
+	server.Commit = func(logMessage string, revprops []PropList) (Editor, error) {
+		return Editor{}, nil
+	}
+	server.FinishCommit = func() (CommitInfo, error) {
+		finishCommitCalled = true
+		return CommitInfo{Rev: 1}, nil
+	}
+
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- server.Serve(serverSide, serverSide) }()
+
+	cc := conn{r: clientSide, w: clientSide}
+	var item Item
+	if err := cc.Read(&item); err != nil {
+		t.Fatalf("reading greeting: %v", err)
+	}
+	if err := cc.Write([]any{2, []any{}, []byte("svn://example.com/repo"), []byte("test-client"), []any{}}); err != nil {
+		t.Fatalf("sending greeting response: %v", err)
+	}
+	if err := cc.Read(&item); err != nil {
+		t.Fatalf("reading auth-request: %v", err)
+	}
+	if err := cc.Write([]any{"ANONYMOUS", []any{[]byte{}}}); err != nil {
+		t.Fatalf("sending auth-response: %v", err)
+	}
+	if err := cc.Read(&item); err != nil {
+		t.Fatalf("reading auth ack: %v", err)
+	}
+	if err := cc.Read(&item); err != nil {
+		t.Fatalf("reading repos-info: %v", err)
+	}
+
+	if err := cc.Write([]any{"commit", []any{[]byte("msg"), []any{}, false, []any{}}}); err != nil {
+		t.Fatalf("sending commit: %v", err)
+	}
+	if err := cc.Read(&item); err != nil {
+		t.Fatalf("reading commit pre-ack: %v", err)
+	}
+	if err := cc.Read(&item); err != nil {
+		t.Fatalf("reading commit ack: %v", err)
+	}
+
+	if err := cc.Write([]any{"open-root", []any{[]any{}, []byte("d0")}}); err != nil {
+		t.Fatalf("sending open-root: %v", err)
+	}
+	if err := cc.Write([]any{"abort-edit", []any{}}); err != nil {
+		t.Fatalf("sending abort-edit: %v", err)
+	}
+	if err := cc.Read(&item); err != nil {
+		t.Fatalf("reading abort-edit ack: %v", err)
+	}
+	if item.Type != ListType || len(item.List) < 1 || item.List[0].Text != "success" {
+		t.Fatalf("abort-edit ack = %s, want a success", item)
+	}
+
+	if err := cc.Read(&item); err != nil {
+		t.Fatalf("reading commit's own deferred pre-ack: %v", err)
+	}
+	if err := cc.ReadResponse(&struct{}{}); err == nil {
+		t.Errorf("commit's own deferred response succeeded after abort-edit, want a failure")
+	}
+	if finishCommitCalled {
+		t.Errorf("FinishCommit should not be called after the client aborted the edit")
+	}
+
+	clientSide.Close()
+	<-serveErr
+}
+
 func TestServerUpdateAndSetPathInvokeCallbacks(t *testing.T) {
 	clientSide, serverSide := net.Pipe()
 	defer clientSide.Close()
