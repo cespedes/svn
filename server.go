@@ -175,6 +175,30 @@ type Server struct {
 	// "abort-edit" instead.
 	FinishReport func(paths []ReportedPath) ([]Item, error)
 
+	// Commit answers a "commit" command, called with the log message and
+	// revision properties the client sent (a real client always resends
+	// the log message a second time as its own "svn:log" entry; see
+	// [Client.Commit]'s own doc comment). It must return an [Editor]
+	// whose fields Serve will call as it parses the client-driven Editor
+	// Command Set that follows -- the reverse of what FinishReport builds
+	// via [EditorWriter] -- giving the implementation a chance to open
+	// whatever transaction or backing-store state it needs, closed over
+	// by both this Editor and the later FinishCommit call. Unlike the
+	// Report Command Set's own set-path/ReportedPath accumulation, Serve
+	// does not accumulate anything here on the caller's behalf: every
+	// node in the commit is handed directly to the returned Editor's own
+	// callbacks as it arrives.
+	Commit func(logMessage string, revprops []PropList) (Editor, error)
+
+	// FinishCommit is called once the client's own close-edit has been
+	// received and acked (see Commit), to report the outcome of whatever
+	// commit Commit's own returned Editor was just driven through. It
+	// must return the new revision (and, optionally, its date, author
+	// and any post-commit hook error) as a [CommitInfo] -- the same shape
+	// [Client.Commit] itself parses back -- or an error to report the
+	// commit as failed instead.
+	FinishCommit func() (CommitInfo, error)
+
 	// Debug, if non-nil, makes Serve log every Item it reads from or
 	// writes to the connection here, prefixed with "> " (sent) or "< "
 	// (received) -- the same convention e.g. "curl -v" uses. The initial

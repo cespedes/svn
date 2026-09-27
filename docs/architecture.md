@@ -185,11 +185,15 @@ this would need:
   the same regardless of direction, so the same reader and callback
   shape already serves a client parsing a server-driven edit, and is
   ready to serve a server parsing a client-driven one the same way.
-- New `Server` callbacks mirroring the existing `Update` + `FinishReport`
-  split: something invoked when `"commit"` arrives (to let an
+- ~~New `Server` callbacks mirroring the existing `Update` + `FinishReport`
+  split~~ **done**: `Server.Commit(logMessage string, revprops []PropList)
+  (Editor, error)`, invoked when `"commit"` arrives (to let an
   implementation open its own transaction and return the `Editor` to
-  drive), and something invoked once the client's `close-edit` is
-  received, to report back the new revision.
+  drive), and `Server.FinishCommit() (CommitInfo, error)`, invoked once
+  the client's `close-edit` is received, to report back the new revision.
+  Neither is wired into `Serve`'s own dispatch switch yet -- there's
+  still no `"commit"` case at all, so this alone changes nothing a real
+  client can observe.
 - Deciding where a commit's author identity comes from: `Server` today
   only distinguishes `ANONYMOUS`/`EXTERNAL` at the transport level, with
   no existing per-connection "who is this" concept.
