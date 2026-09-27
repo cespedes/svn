@@ -206,6 +206,64 @@ func (s *Server) listOrEmpty(path string, rev uint) ([]Dirent, error) {
 	return entries, nil
 }
 
+// listBothSides lists a directory's own direct children at toDirPath
+// (always) and, unless isNew (the node doesn't exist on the "from" side
+// at all, so there is nothing there to list), at fromDirPath too,
+// returning each side's children plus the "from" side's own self-entry
+// Path (needed as the next recursion level's fromSelfPath). This is the
+// shared logic behind every point diffEdit's tree walk recurses at: a
+// directory visited by updateChildren, an intermediate directory
+// updateNavigateToTarget only walks through, or the final target when it
+// turns out to be a directory.
+func (s *Server) listBothSides(fromDirPath, toDirPath string, fromRev, toRev uint, isNew bool) (toChildren, fromChildren []Dirent, fromSelfPath string, err error) {
+	toEntries, err := s.List(toDirPath, &toRev, "immediates", checkoutListFields, nil)
+	if err != nil {
+		return nil, nil, "", err
+	}
+	_, toChildren = splitCheckoutEntries(toEntries)
+	if isNew {
+		return toChildren, nil, "", nil
+	}
+	fromEntries, err := s.listOrEmpty(fromDirPath, fromRev)
+	if err != nil {
+		return nil, nil, "", err
+	}
+	fromSelf, fromChildren := splitCheckoutEntries(fromEntries)
+	if fromSelf != nil {
+		fromSelfPath = fromSelf.Path
+	}
+	return toChildren, fromChildren, fromSelfPath, nil
+}
+
+// describeDir emits wirePath as a directory node (AddDir if isNew,
+// otherwise OpenDir at fromRev) plus its entry-props, then recurses into
+// its children (via listBothSides + updateChildren) and closes it.
+// Shared between updateChildren's own "dir" case (describing a genuine
+// child, wirePath equal to childWirePath) and updateNavigateToTarget's
+// final-target case (describing the target itself, when it's a
+// directory, wirePath equal to just its own bare name) -- the two only
+// ever differed in which wire path they used.
+func (s *Server) describeDir(e *EditorWriter, fromDirPath, toDirPath, wirePath string, toEntry Dirent, isNew bool, fromRev, toRev uint) error {
+	if isNew {
+		if err := e.AddDir(wirePath, nil); err != nil {
+			return err
+		}
+	} else if err := e.OpenDir(wirePath, fromRev); err != nil {
+		return err
+	}
+	if err := s.checkoutEmitEntryProps(e.ChangeDirProp, toEntry); err != nil {
+		return err
+	}
+	toChildren, fromChildren, fromSelfPath, err := s.listBothSides(fromDirPath, toDirPath, fromRev, toRev, isNew)
+	if err != nil {
+		return err
+	}
+	if err := s.updateChildren(e, fromDirPath, toDirPath, wirePath, fromSelfPath, toEntry.Path, fromChildren, toChildren, fromRev, toRev); err != nil {
+		return err
+	}
+	return e.CloseDir()
+}
+
 // updateChildren describes, under e's currently open directory, the
 // difference between fromChildren and toChildren (the already-listed
 // direct children of fromDirPath at fromRev and of toDirPath at toRev
@@ -254,41 +312,7 @@ func (s *Server) updateChildren(e *EditorWriter, fromDirPath, toDirPath, wirePat
 
 		switch to.Kind {
 		case "dir":
-			if isNew {
-				if err := e.AddDir(childWirePath, nil); err != nil {
-					return err
-				}
-			} else if err := e.OpenDir(childWirePath, fromRev); err != nil {
-				return err
-			}
-			if err := s.checkoutEmitEntryProps(e.ChangeDirProp, to); err != nil {
-				return err
-			}
-			toGrandEntries, err := s.List(childToDirPath, &toRev, "immediates", checkoutListFields, nil)
-			if err != nil {
-				return err
-			}
-			// to.Path (not a fresh self-lookup) is already this child's
-			// own true, repository-root-relative Path, per Server.List's
-			// contract -- reused directly as the next level's toSelfPath.
-			_, toGrandchildren := splitCheckoutEntries(toGrandEntries)
-			var fromGrandchildren []Dirent
-			var fromGrandSelfPath string
-			if !isNew {
-				fromGrandEntries, err := s.listOrEmpty(childFromDirPath, fromRev)
-				if err != nil {
-					return err
-				}
-				var fromGrandSelf *Dirent
-				fromGrandSelf, fromGrandchildren = splitCheckoutEntries(fromGrandEntries)
-				if fromGrandSelf != nil {
-					fromGrandSelfPath = fromGrandSelf.Path
-				}
-			}
-			if err := s.updateChildren(e, childFromDirPath, childToDirPath, childWirePath, fromGrandSelfPath, to.Path, fromGrandchildren, toGrandchildren, fromRev, toRev); err != nil {
-				return err
-			}
-			if err := e.CloseDir(); err != nil {
+			if err := s.describeDir(e, childFromDirPath, childToDirPath, childWirePath, to, isNew, fromRev, toRev); err != nil {
 				return err
 			}
 		case "file":
@@ -342,23 +366,9 @@ func (s *Server) updateNavigateToTarget(e *EditorWriter, fromDirPath, toDirPath,
 		if to.Kind != "dir" {
 			return fmt.Errorf("svn: diffEdit: %s: not a directory", childToDirPath)
 		}
-		toGrandEntries, err := s.List(childToDirPath, &toRev, "immediates", checkoutListFields, nil)
+		toGrandchildren, fromGrandchildren, fromGrandSelfPath, err := s.listBothSides(childFromDirPath, childToDirPath, fromRev, toRev, isNew)
 		if err != nil {
 			return err
-		}
-		_, toGrandchildren := splitCheckoutEntries(toGrandEntries)
-		var fromGrandchildren []Dirent
-		var fromGrandSelfPath string
-		if !isNew {
-			fromGrandEntries, err := s.listOrEmpty(childFromDirPath, fromRev)
-			if err != nil {
-				return err
-			}
-			var fromGrandSelf *Dirent
-			fromGrandSelf, fromGrandchildren = splitCheckoutEntries(fromGrandEntries)
-			if fromGrandSelf != nil {
-				fromGrandSelfPath = fromGrandSelf.Path
-			}
 		}
 		return s.updateNavigateToTarget(e, childFromDirPath, childToDirPath, fromGrandSelfPath, to.Path, fromGrandchildren, toGrandchildren, segments[1:], fromRev, toRev)
 	}
@@ -369,38 +379,7 @@ func (s *Server) updateNavigateToTarget(e *EditorWriter, fromDirPath, toDirPath,
 	// starting fresh at that same bare name.
 	switch to.Kind {
 	case "dir":
-		if isNew {
-			if err := e.AddDir(name, nil); err != nil {
-				return err
-			}
-		} else if err := e.OpenDir(name, fromRev); err != nil {
-			return err
-		}
-		if err := s.checkoutEmitEntryProps(e.ChangeDirProp, to); err != nil {
-			return err
-		}
-		toGrandEntries, err := s.List(childToDirPath, &toRev, "immediates", checkoutListFields, nil)
-		if err != nil {
-			return err
-		}
-		_, toGrandchildren := splitCheckoutEntries(toGrandEntries)
-		var fromGrandchildren []Dirent
-		var fromGrandSelfPath string
-		if !isNew {
-			fromGrandEntries, err := s.listOrEmpty(childFromDirPath, fromRev)
-			if err != nil {
-				return err
-			}
-			var fromGrandSelf *Dirent
-			fromGrandSelf, fromGrandchildren = splitCheckoutEntries(fromGrandEntries)
-			if fromGrandSelf != nil {
-				fromGrandSelfPath = fromGrandSelf.Path
-			}
-		}
-		if err := s.updateChildren(e, childFromDirPath, childToDirPath, name, fromGrandSelfPath, to.Path, fromGrandchildren, toGrandchildren, fromRev, toRev); err != nil {
-			return err
-		}
-		return e.CloseDir()
+		return s.describeDir(e, childFromDirPath, childToDirPath, name, to, isNew, fromRev, toRev)
 	case "file":
 		switch {
 		case isNew:
