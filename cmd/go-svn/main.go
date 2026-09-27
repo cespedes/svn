@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/cespedes/svn"
 )
@@ -222,6 +223,20 @@ func parseRevNumber(s string) (int, error) {
 	return n, nil
 }
 
+// formatDate parses s -- a Dirent/Stat/LogEntry's own CreatedDate/Date
+// field, always an ISO 8601 timestamp in UTC (e.g.
+// "2024-04-02T13:37:34.350221Z") -- and formats it as "yyyy-mm-dd
+// hh:mm:ss" in the local time zone, the same shape every subcommand
+// that prints a date uses. s is returned unchanged if it doesn't parse
+// (e.g. empty, for a node with no recorded date).
+func formatDate(s string) string {
+	t, err := time.Parse(time.RFC3339Nano, s)
+	if err != nil {
+		return s
+	}
+	return t.Local().Format("2006-01-02 15:04:05")
+}
+
 func svnInfo(repo string, lrev *int, stdout io.Writer) error {
 	c, err := svn.Connect(repo)
 
@@ -252,7 +267,7 @@ func svnInfo(repo string, lrev *int, stdout io.Writer) error {
 	fmt.Fprintf(stdout, "Node Kind: %s\n", stat.Kind)
 	fmt.Fprintf(stdout, "Last Changed Author: %s\n", stat.LastAuthor)
 	fmt.Fprintf(stdout, "Last Changed Rev: %d\n", stat.CreatedRev)
-	fmt.Fprintf(stdout, "Last Changed Date: %s\n", stat.CreatedDate)
+	fmt.Fprintf(stdout, "Last Changed Date: %s\n", formatDate(stat.CreatedDate))
 
 	return nil
 }
@@ -331,7 +346,7 @@ func svnLs(repo string, lrev *int, verbose bool, stdout io.Writer) error {
 			p += "/"
 		}
 		if verbose {
-			date := entry.CreatedDate[0:10] + " " + entry.CreatedDate[11:19]
+			date := formatDate(entry.CreatedDate)
 			fmt.Fprintf(stdout, "%*d %-*s %*s %s %s\n",
 				maxRevLen, entry.CreatedRev,
 				maxAuthorLen, entry.LastAuthor,
@@ -377,7 +392,7 @@ func svnLog(repo string, lrev1 *int, lrev2 *int, verbose bool, stdout io.Writer)
 		if lines > 0 {
 			slines = fmt.Sprintf("%d lines", lines+1)
 		}
-		fmt.Fprintf(stdout, "r%d | %s | %s | %s\n", l.Rev, l.Author, l.Date, slines)
+		fmt.Fprintf(stdout, "r%d | %s | %s | %s\n", l.Rev, l.Author, formatDate(l.Date), slines)
 		if len(l.Changed) > 0 {
 			fmt.Fprintln(stdout, "Changed paths:")
 			for _, c := range l.Changed {

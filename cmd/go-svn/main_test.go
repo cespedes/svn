@@ -11,8 +11,10 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
+	"time"
 )
 
 // requireRealSVNTools skips the test unless svnadmin, svn and svnserve
@@ -303,6 +305,42 @@ func TestCLIOptionOrdering(t *testing.T) {
 			}
 		}
 	})
+
+	// Reported as a real bug: "info"/"log" printed a commit's date as
+	// the raw ISO 8601 string the wire protocol uses ("2024-04-02T13:37:
+	// 34.350221Z"), while "ls -v" instead reformatted it by slicing
+	// ("2024-04-02 13:37:34", still in UTC) -- two different shapes,
+	// neither in the local time zone. All three now use formatDate,
+	// giving the exact same "yyyy-mm-dd hh:mm:ss", in local time, for
+	// the same commit.
+	t.Run("info/log/ls -v show dates in the same format", func(t *testing.T) {
+		dateRe := regexp.MustCompile(`\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}`)
+
+		var infoOut bytes.Buffer
+		if err := run([]string{"go-svn", "info", "-r1", repoURL}, &infoOut); err != nil {
+			t.Fatalf("info: %v", err)
+		}
+		infoDate := dateRe.FindString(infoOut.String())
+		if infoDate == "" {
+			t.Fatalf("info output has no yyyy-mm-dd hh:mm:ss date:\n%s", infoOut.String())
+		}
+
+		var logOut bytes.Buffer
+		if err := run([]string{"go-svn", "log", "-r1", repoURL}, &logOut); err != nil {
+			t.Fatalf("log: %v", err)
+		}
+		if logDate := dateRe.FindString(logOut.String()); logDate != infoDate {
+			t.Errorf("log date = %q, want the same as info's own %q", logDate, infoDate)
+		}
+
+		var lsOut bytes.Buffer
+		if err := run([]string{"go-svn", "ls", "-v", "-r1", repoURL}, &lsOut); err != nil {
+			t.Fatalf("ls: %v", err)
+		}
+		if lsDate := dateRe.FindString(lsOut.String()); lsDate != infoDate {
+			t.Errorf("ls -v date = %q, want the same as info's own %q", lsDate, infoDate)
+		}
+	})
 }
 
 // TestCheckoutAndUpdate checks "go-svn checkout"/"go-svn update" against
@@ -422,6 +460,33 @@ func TestCheckoutAndUpdate(t *testing.T) {
 // parseArgs with the arguments following the subcommand), "-r" with
 // either a joined ("-r5", "-r5:6") or separate ("-r", "5") value, and a
 // subcommand rejecting an option it doesn't accept.
+// TestFormatDate checks formatDate against the exact ISO 8601 shape
+// Dirent/Stat/LogEntry's own CreatedDate/Date fields use (UTC, with
+// fractional seconds), converting to the local time zone -- reported as
+// a real bug: "info"/"log" printed that raw UTC string verbatim, while
+// "ls -v" instead reformatted it by slicing (still in UTC, not the
+// local zone), so the three subcommands showed dates in two different
+// shapes, neither of them in local time.
+func TestFormatDate(t *testing.T) {
+	const in = "2024-04-02T13:37:34.350221Z"
+	got := formatDate(in)
+
+	want, err := time.Parse(time.RFC3339Nano, in)
+	if err != nil {
+		t.Fatalf("parsing the test's own input: %v", err)
+	}
+	wantStr := want.Local().Format("2006-01-02 15:04:05")
+	if got != wantStr {
+		t.Errorf("formatDate(%q) = %q, want %q", in, got, wantStr)
+	}
+
+	// An unparseable (e.g. empty) date is returned unchanged rather
+	// than failing the whole command.
+	if got := formatDate(""); got != "" {
+		t.Errorf("formatDate(\"\") = %q, want \"\"", got)
+	}
+}
+
 func TestParseArgs(t *testing.T) {
 	i := func(n int) *int { return &n }
 
