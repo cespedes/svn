@@ -420,6 +420,32 @@ func TestCheckoutAndUpdate(t *testing.T) {
 		t.Errorf("trunk/newfile.go = %q, want %q", got, "package main\n")
 	}
 
+	write("trunk/main.go", "package main\n\nfunc main() { println(\"v3\") }\n")
+	svnCmd("commit", "-q", "-m", "v3")
+
+	t.Run("update with no localdir uses the current directory", func(t *testing.T) {
+		cwd, err := os.Getwd()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chdir(dest); err != nil {
+			t.Fatal(err)
+		}
+		defer os.Chdir(cwd)
+
+		var out bytes.Buffer
+		if err := run([]string{"go-svn", "update"}, &out); err != nil {
+			t.Fatalf("update: %v\noutput:\n%s", err, out.String())
+		}
+		if !strings.Contains(out.String(), "Updated to revision 3.") {
+			t.Errorf("update output missing revision summary:\n%s", out.String())
+		}
+		want := "package main\n\nfunc main() { println(\"v3\") }\n"
+		if got := readFile(t, filepath.Join(dest, "trunk", "main.go")); got != want {
+			t.Errorf("trunk/main.go = %q, want %q", got, want)
+		}
+	})
+
 	// "checkout" of a URL that names a file, not a directory: reported
 	// as a real bug ("go-svn checkout" of a file URL surfaced only as a
 	// confusing, low-level svnserve error, "160005 Cannot replace a
@@ -577,6 +603,37 @@ func TestCommit(t *testing.T) {
 		}
 		if !strings.Contains(err.Error(), "requires a commit message") {
 			t.Errorf("error = %q, want it to mention a commit message is required", err.Error())
+		}
+	})
+
+	t.Run("commit with no localdir uses the current directory", func(t *testing.T) {
+		if err := os.WriteFile(filepath.Join(dest, "trunk", "another.go"), []byte("package main\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		cwd, err := os.Getwd()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chdir(dest); err != nil {
+			t.Fatal(err)
+		}
+		defer os.Chdir(cwd)
+
+		var out bytes.Buffer
+		if err := run([]string{"go-svn", "commit", "-m", "from cwd"}, &out); err != nil {
+			t.Fatalf("commit: %v\noutput:\n%s", err, out.String())
+		}
+		if !strings.Contains(out.String(), "Committed revision 3.") {
+			t.Errorf("commit output missing revision summary:\n%s", out.String())
+		}
+
+		anotherOut, err := exec.Command("svn", "--non-interactive", "cat", repoURL+"/trunk/another.go").CombinedOutput()
+		if err != nil {
+			t.Fatalf("svn cat trunk/another.go: %v\n%s", err, anotherOut)
+		}
+		if string(anotherOut) != "package main\n" {
+			t.Errorf("svn cat trunk/another.go = %q, want %q", anotherOut, "package main\n")
 		}
 	})
 }

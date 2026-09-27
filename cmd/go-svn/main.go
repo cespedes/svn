@@ -126,25 +126,33 @@ func run(args []string, stdout io.Writer) error {
 		if err != nil {
 			return err
 		}
-		if len(positional) != 1 {
-			return errors.New("subcommand 'update' takes exactly one argument (a local directory 'checkout' produced)")
+		if len(positional) > 1 {
+			return errors.New("subcommand 'update' takes at most one argument (a local directory 'checkout' produced; the current directory if omitted)")
 		}
 		if lrev2 != nil {
 			return errors.New("subcommand 'update' does not accept a revision range")
 		}
-		return svnUpdate(positional[0], lrev1, stdout)
+		dest := "."
+		if len(positional) == 1 {
+			dest = positional[0]
+		}
+		return svnUpdate(dest, lrev1, stdout)
 	case "commit":
 		positional, _, _, _, message, err := parseArgs(rest, false, false, true)
 		if err != nil {
 			return err
 		}
-		if len(positional) != 1 {
-			return errors.New("subcommand 'commit' takes exactly one argument (a local directory 'checkout' produced)")
+		if len(positional) > 1 {
+			return errors.New("subcommand 'commit' takes at most one argument (a local directory 'checkout' produced; the current directory if omitted)")
 		}
 		if message == "" {
 			return errors.New("subcommand 'commit' requires a commit message: use '-m message'")
 		}
-		return svnCommit(positional[0], message, stdout)
+		dest := "."
+		if len(positional) == 1 {
+			dest = positional[0]
+		}
+		return svnCommit(dest, message, stdout)
 	default:
 		return fmt.Errorf(`unknown subcommand: '%s'
 Type 'go-svn help' for usage`, cmdName)
@@ -1171,8 +1179,11 @@ Available subcommands:
    log [-r rev[:rev2]] [-v] <repo>
    export [-r rev] <repo> [localdir]
    checkout [-r rev] <repo> [localdir]
-   update [-r rev] <localdir>
-   commit -m message <localdir>
+   update [-r rev] [localdir]
+   commit -m message [localdir]
+
+"update"/"commit" default localdir to the current directory if omitted,
+the same way a real "svn" does.
 
 go-svn is a client for the Subversion protocol.`)
 }

@@ -38,8 +38,8 @@ ignored.
 | `log` | shows log messages; `-r rev1:rev2` selects a revision range, `-v` also lists each entry's changed paths |
 | `export <repo> [localdir]` | writes a clean copy of `repo` (no version-control metadata) to `localdir`, or to a directory named after `repo`'s own last path segment if `localdir` is omitted |
 | `checkout <repo> [localdir]` | like `export`, but driving a real report/editor exchange instead of a one-shot recursive walk, so `update` can later bring the result forward touching only what changed |
-| `update <localdir>` | brings a directory `checkout` produced up to a newer revision (default: latest) in place |
-| `commit -m message <localdir>` | sends every local change under `<localdir>` (added, removed or modified since it was last checked out or updated) back to the repository as a new revision |
+| `update [localdir]` | brings a directory `checkout` produced up to a newer revision (default: latest) in place; `localdir` defaults to the current directory, like a real `svn update` |
+| `commit -m message [localdir]` | sends every local change under `localdir` (added, removed or modified since it was last checked out or updated) back to the repository as a new revision; `localdir` defaults to the current directory, like a real `svn commit` |
 
 `-r rev` or `-r rev1:rev2` selects a revision or revision range, where the
 subcommand supports it, either joined (`-r100`, `-r100:200`) or as a
@@ -56,7 +56,7 @@ connected to), optionally pointing below the repository root (e.g.
 `checkout`/`update` write the same kind of plain, unversioned tree
 `export` does -- no `.svn` working-copy metadata -- but remember which
 repository URL and revision a directory holds in a small `.go-svn-checkout`
-sidecar file, so `update <localdir>` needs no URL argument.
+sidecar file, so `update`/`commit` need no URL argument.
 
 ## Examples
 
@@ -69,4 +69,8 @@ go-svn export svn+ssh://example.com/repo/trunk
 go-svn checkout svn+ssh://example.com/repo/trunk
 go-svn update trunk
 go-svn commit -m "fix bug" trunk
+
+# from inside trunk itself, localdir can be omitted:
+go-svn update
+go-svn commit -m "fix bug"
 ```
