@@ -69,6 +69,17 @@ func fakeTreeAt(rev int) map[string]fakeNode {
 		"README.md":     {kind: "file", rev: 1, content: "hello world\n"},
 		"trunk":         {kind: "dir", rev: 1},
 		"trunk/main.go": {kind: "file", rev: 1, content: "package main\n"},
+		// "branches/foo" is an independent tree, unrelated (by history)
+		// to "trunk", for TestServerAgainstRealSVNClient's "switch"
+		// subtest: same name ("main.go") but different content/rev than
+		// trunk's own, and no counterpart at all to trunk's own
+		// newdir/newfile.go -- so a switch from trunk to it exercises a
+		// modified file, a deleted directory and a deleted file all at
+		// once, purely by name correspondence rather than shared
+		// history.
+		"branches":             {kind: "dir", rev: 1},
+		"branches/foo":         {kind: "dir", rev: 1},
+		"branches/foo/main.go": {kind: "file", rev: 1, content: "package main\n\n// branch variant\n"},
 	}
 	if rev < 2 {
 		tree["trunk/sub"] = fakeNode{kind: "dir", rev: 1}
@@ -106,8 +117,18 @@ func fakeTreeAt(rev int) map[string]fakeNode {
 func newFakeServer() *svn.Server {
 	var sessionBase string
 
+	// resolve turns path into a repository-root-relative tree key. A
+	// leading "/" marks path as already repository-root-relative
+	// (bypassing sessionBase entirely) rather than relative to the
+	// session's own anchor -- a convention this fake server's own
+	// Switch/FinishReport wiring relies on to reach a "switch" target
+	// that generally isn't reachable as a forward-only path from
+	// whatever the session happens to be anchored at (see
+	// svn.Server.SwitchEdit's own doc comment on fromPath/toPath).
 	resolve := func(path string) string {
 		switch {
+		case strings.HasPrefix(path, "/"):
+			return strings.TrimPrefix(path, "/")
 		case sessionBase == "":
 			return path
 		case path == "":
@@ -115,6 +136,18 @@ func newFakeServer() *svn.Server {
 		default:
 			return sessionBase + "/" + path
 		}
+	}
+	// setSessionBase records connectURL's own path (trimmed of slashes)
+	// as the session's new anchor, shared by Greet and Reparent (a real
+	// client commonly reparents an existing session while preparing a
+	// "switch", rather than opening a second connection).
+	setSessionBase := func(connectURL string) error {
+		u, err := url.Parse(connectURL)
+		if err != nil {
+			return err
+		}
+		sessionBase = strings.Trim(u.Path, "/")
+		return nil
 	}
 	// effectiveRev turns a callback's own rev argument (nil meaning
 	// "latest") into a concrete revision number to key fakeTreeAt with.
@@ -131,7 +164,9 @@ func newFakeServer() *svn.Server {
 		if err != nil {
 			return svn.ReposInfo{}, err
 		}
-		sessionBase = strings.Trim(u.Path, "/")
+		if err := setSessionBase(connectURL); err != nil {
+			return svn.ReposInfo{}, err
+		}
 		root := *u
 		root.Path = "/"
 		return svn.ReposInfo{
@@ -140,12 +175,16 @@ func newFakeServer() *svn.Server {
 			Capabilities: []string{},
 		}, nil
 	}
+	server.Reparent = func(newURL string) error { return setSessionBase(newURL) }
 	server.GetLatestRev = func() (int, error) { return fakeLatestRev, nil }
 	var updateRev *uint
 	var updateTarget string
+	var isSwitch bool
+	var switchToPath string
 	server.Update = func(rev *uint, target string, recurse bool) {
 		updateRev = rev
 		updateTarget = target
+		isSwitch = false
 	}
 	server.Diff = func(rev *uint, target string, recurse, ignoreAncestry bool, versusURL string, textDeltas bool, depth string) {
 		// Reuses the same closure variables as Update: FinishReport
@@ -158,10 +197,29 @@ func newFakeServer() *svn.Server {
 		// stripped of this session's own anchor the same way every
 		// other path argument already is.
 		updateRev = rev
+		isSwitch = false
 		if rel, err := svn.RepoRelativePath(server.ReposInfo.URL, versusURL); err == nil {
 			updateTarget = strings.TrimPrefix(strings.TrimPrefix(rel, sessionBase), "/")
 		} else {
 			updateTarget = target
+		}
+	}
+	server.Switch = func(rev *uint, target string, recurse bool, switchURL string, depth string, sendCopyfromArgs, ignoreAncestry bool) {
+		// Like Diff's own versusURL, switchURL (not target) is the
+		// reliable source of the real destination path, since a real
+		// client's "switch" is generally preceded by reparenting an
+		// existing session back to align with the *source* side (see
+		// Reparent) rather than the destination -- see
+		// svn.Server.SwitchEdit's own doc comment. The result is kept
+		// "/"-prefixed (repository-root-relative), the convention
+		// resolve (above) uses to tell it apart from every other,
+		// session-anchor-relative path argument.
+		updateRev = rev
+		isSwitch = true
+		if rel, err := svn.RepoRelativePath(server.ReposInfo.URL, switchURL); err == nil {
+			switchToPath = "/" + rel
+		} else {
+			switchToPath = "/" + target
 		}
 	}
 	server.Stat = func(path string, rev *uint) (svn.Dirent, error) {
@@ -266,6 +324,9 @@ func newFakeServer() *svn.Server {
 			return server.CheckoutEdit(report[0].Path, *toRev)
 		}
 		if fromRev, ok := svn.IsSingleRevisionUpdate(report); ok {
+			if isSwitch {
+				return server.SwitchEdit(report[0].Path, switchToPath, updateTarget, fromRev, *toRev)
+			}
 			return server.UpdateEdit(report[0].Path, updateTarget, fromRev, *toRev)
 		}
 		return nil, fmt.Errorf("fake server: unsupported report shape: %+v", report)
@@ -579,6 +640,42 @@ func TestServerAgainstRealSVNClient(t *testing.T) {
 		}
 		if _, err := os.Stat(filepath.Join(dir, "README.md")); err != nil {
 			t.Errorf("README.md should still be there, untouched by updating just trunk: %v", err)
+		}
+	})
+
+	// "svn switch" from trunk to branches/foo: exercises Server.Switch +
+	// Server.Reparent (a real client reparents its RA session, often
+	// more than once, while preparing a switch -- see newFakeServer's
+	// own Reparent wiring) and Server.SwitchEdit diffing two entirely
+	// unrelated repository locations by name rather than by revision of
+	// the same path (see fakeTreeAt's own "branches/foo" doc comment).
+	t.Run("switch", func(t *testing.T) {
+		dir := t.TempDir()
+		run("checkout", "-q", repoURL+"trunk", dir)
+		run("switch", "-q", repoURL+"branches/foo", dir)
+
+		mainGo, err := os.ReadFile(filepath.Join(dir, "main.go"))
+		if err != nil {
+			t.Fatalf("reading main.go: %v", err)
+		}
+		if want := "package main\n\n// branch variant\n"; string(mainGo) != want {
+			t.Errorf("main.go content = %q, want %q", mainGo, want)
+		}
+		if _, err := os.Stat(filepath.Join(dir, "newdir")); err == nil {
+			t.Errorf("newdir (only in trunk) should have been removed by the switch")
+		}
+		if _, err := os.Stat(filepath.Join(dir, "newfile.go")); err == nil {
+			t.Errorf("newfile.go (only in trunk) should have been removed by the switch")
+		}
+
+		info := run("info", dir)
+		if !strings.Contains(info, "URL: "+repoURL+"branches/foo") {
+			t.Errorf("info output missing switched-to URL:\n%s", info)
+		}
+
+		status := run("status", dir)
+		if strings.TrimSpace(status) != "" {
+			t.Errorf("expected a clean status after switch, got:\n%s", status)
 		}
 	})
 

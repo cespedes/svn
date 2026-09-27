@@ -15,7 +15,7 @@ These are the commands a client sends to ask the server to do something.
 
 | Command | Client | Server | Notes |
 | --- | --- | --- | --- |
-| `reparent` | ❌ | ❌ | |
+| `reparent` | ❌ | ✅ | `Server.Reparent` callback, purely informational (like `set-path`): `Serve` itself has no notion of a session's own anchor, so this only matters to a `Server` implementation whose own callbacks resolve a path against a remembered one -- a real client commonly reparents an existing session, often more than once, while preparing a "switch" (see below), rather than opening a new connection. `Client` has no method to send this command |
 | `get-latest-rev` | ✅ | ✅ | `Client.GetLatestRev`; `server.go`'s `"get-latest-rev"` case |
 | `get-dated-rev` | ❌ | ❌ | |
 | `change-rev-prop` | ❌ | ❌ | no revision-property support at all |
@@ -29,7 +29,7 @@ These are the commands a client sends to ask the server to do something.
 | `stat` | ✅ | ✅ | `Client.Stat`; `server.go`'s `"stat"` case. See the README's note on this command's real, twice-nested wire shape |
 | `get-mergeinfo` | ❌ | ❌ | |
 | `update` | ❌ | ✅ for a checkout or a single-revision update | `Server.Update` callback is invoked with the parsed arguments and has no return value, but the report/editor exchange that follows (`set-path`, ..., `finish-report`) now drives a real, working "svn checkout" or "svn update" (for a working copy that isn't "mixed revision") -- see the Report/Editor Command Set sections below. `Client` has no method to send this command at all |
-| `switch` | ❌ | ❌ | needs the same report/editor exchange as `update`, plus target-selection logic (diffing against a *different* path, not just a newer revision of the same one) |
+| `switch` | ❌ | ✅ for a single-revision switch | `Server.Switch` callback is invoked with the parsed arguments and has no return value; the report/editor exchange that follows drives the switch via `Server.SwitchEdit`, the same report/editor mechanism `update` uses but diffing two different repository locations (by name, not shared history) instead of two revisions of the same one -- see the Editor Command Set section below. Confirmed by raw wire capture that `switch`'s own param order differs from `diff`'s: `( [rev] target recurse url ? depth send-copyfrom-args ignore-ancestry )`, with `depth`/`send-copyfrom-args`/`ignore-ancestry` all coming after `url`, not interleaved with `recurse`/`ignore-ancestry` the way `diff`'s params are. `Client` has no method to send this command at all |
 | `status` | ❌ | ❌ | note: this is the wire command a real client uses to compute local status, unrelated to this package's own `Server` type name |
 | `diff` | ❌ | ✅ for a single-revision comparison | `Server.Diff` callback is invoked with the parsed arguments and has no return value; the report/editor exchange that follows drives the diff, via the exact same `IsSingleRevisionUpdate`/`UpdateEdit` machinery "update" uses (the accumulated report looks identical either way -- see the Report/Editor Command Set sections below). `Client` has no method to send this command at all |
 | `log` | ✅ | ✅ | `Client.Log`; `server.go`'s `"log"` case |
@@ -61,7 +61,7 @@ reach `finish-report`.
 | `set-path` | ❌ | ⚠️ | `Serve` accumulates every `set-path` call into a `[]ReportedPath`, passed to `FinishReport` once the report ends; `Server.SetPath` itself is optional and purely informational (e.g. logging) -- it does not need to be set for the accumulation to happen |
 | `delete-path` | ❌ | ❌ | no case in `server.go`'s switch: replies "Unknown command"; not yet folded into `ReportedPath` accumulation |
 | `link-path` | ❌ | ❌ | same |
-| `finish-report` | ❌ | ✅ for a checkout, or a single-revision update/diff | `Server.FinishReport` callback receives the accumulated `[]ReportedPath`; for the shape `IsPlainCheckout` recognizes, `Server.CheckoutEdit` builds the resulting `[]Item` automatically, and for the shape `IsSingleRevisionUpdate` recognizes (a working copy that isn't "mixed revision"), `Server.UpdateEdit` does, by diffing the client's revision against the target one (see the Editor Command Set section below) -- this same shape, and so the same `IsSingleRevisionUpdate`/`UpdateEdit` call, is what a "diff" command's report reduces to as well. A mixed-revision report still needs a caller-supplied `EditorWriter` sequence |
+| `finish-report` | ❌ | ✅ for a checkout, or a single-revision update/diff/switch | `Server.FinishReport` callback receives the accumulated `[]ReportedPath`; for the shape `IsPlainCheckout` recognizes, `Server.CheckoutEdit` builds the resulting `[]Item` automatically, and for the shape `IsSingleRevisionUpdate` recognizes (a working copy that isn't "mixed revision"), `Server.UpdateEdit`/`Server.SwitchEdit` do, by diffing the client's revision against the target one, or against a different repository location, respectively (see the Editor Command Set section below) -- this same shape, and so the same `IsSingleRevisionUpdate` call, is what both a "diff" and a "switch" command's report reduce to as well. A mixed-revision report still needs a caller-supplied `EditorWriter` sequence |
 | `abort-report` | ❌ | ❌ | no case in `server.go`'s switch |
 
 ## Editor Command Set
@@ -106,8 +106,25 @@ real, possibly multi-segment path itself, typically via `RepoRelativePath`
 `Server.ReposInfo.URL`). Both are confirmed end to end against a real
 `svn checkout`/`svn update`/`svn diff`, including of a single nested file
 (`TestServerAgainstRealSVNClient` in `server_integration_test.go`).
-`switch` and a mixed-revision `update` still need a caller to drive
-`EditorWriter` itself, since neither is implemented. `close-edit`/
+`Server.SwitchEdit` (`update.go`, alongside `UpdateEdit` -- both share
+most of their implementation, factored into an unexported `diffEdit`)
+does the same as `UpdateEdit`, except that its "from" and "to" sides can
+be two entirely different repository locations (e.g. "trunk" and
+"branches/foo") rather than the same path at two revisions: a node
+present under both is still compared by name and diffed exactly like
+`UpdateEdit` does (open/modify if its kind matches, delete-then-add if it
+doesn't), with no attempt to detect a rename or otherwise use copy
+ancestry, since the two sides are walked purely structurally. Its own
+`target` parameter works the same way `UpdateEdit`'s does, navigating
+down from both sides in parallel by the same segment names. Confirmed
+end to end against a real `svn switch`, including that a real client
+generally reparents an existing session -- see `reparent` above -- back
+to align with the *source* side right before actually sending `switch`,
+so a `Server.Switch` callback needs to recover the real destination path
+from the command's own `url` argument, the same way a `Server.Diff`
+callback already needs to for `versusURL` (see `RepoRelativePath`), not
+from `target`. A mixed-revision `update` still needs a caller to drive
+`EditorWriter` itself, since it isn't implemented. `close-edit`/
 `abort-edit` specifically are always sent automatically by `server.go`
 itself (not via `EditorWriter`) to end the exchange once `FinishReport`
 returns.

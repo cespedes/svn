@@ -123,6 +123,41 @@ type Server struct {
 	// revision's content locally instead of overwriting it.
 	Diff func(rev *uint, target string, recurse bool, ignoreAncestry bool, versusURL string, textDeltas bool, depth string)
 
+	// Switch is called for a "switch" command, with the client's
+	// requested target revision (nil meaning the latest), the target
+	// path within the repository, whether to switch recursively, the URL
+	// to switch to, the requested depth, whether the client wants
+	// copy-from arguments, and whether to ignore ancestry. Like Update
+	// and Diff, it has no return value: the actual result is driven by
+	// the same report/editor exchange that follows (set-path, ...,
+	// finish-report), except that a Server.FinishReport implementation
+	// now needs a report/editor helper that diffs two different paths
+	// (see [Server.SwitchEdit]) rather than the same path across two
+	// revisions.
+	//
+	// A real client often reuses an existing session anchored elsewhere,
+	// reparenting it as needed (see Reparent) before finally reparenting
+	// back to the switch target's own current location and sending
+	// "switch" with an empty target relative to that anchor -- so, like
+	// Diff's versusURL, url is generally the only reliable source of the
+	// real destination path; see [RepoRelativePath].
+	Switch func(rev *uint, target string, recurse bool, url string, depth string, sendCopyfromArgs bool, ignoreAncestry bool)
+
+	// Reparent is called for a "reparent" command, changing the
+	// session's own anchor (the path every subsequent command's own path
+	// argument is relative to) to url without opening a new connection.
+	// It is purely informational, like SetPath: Serve itself has no
+	// notion of "the session's anchor" (every path argument is passed
+	// through to a callback exactly as the client sent it), so a Server
+	// implementation whose callbacks resolve a path against a
+	// remembered anchor (the same one Greet's own connectURL argument
+	// seeded) needs Reparent to learn about it changing -- a real
+	// client commonly reparents an existing session back and forth
+	// while preparing a "switch" (see Switch), rather than opening a
+	// second connection. Serve replies "unimplemented" if Reparent is
+	// nil, which a real client's "switch" cannot proceed past.
+	Reparent func(url string) error
+
 	// SetPath is called for a "set-path" command, part of the report
 	// mechanism a client uses to describe what it already has before an
 	// update. It is purely informational: Serve records every set-path
@@ -724,6 +759,76 @@ func (s *Server) Serve(r io.Reader, w io.Writer) error {
 			// waiting for this ack immediately, since it never comes
 			// with that assumption, is what caught the mistake).
 			if err = conn.WriteSuccess([]any{[]any{}, []byte{}}); err != nil {
+				return err
+			}
+		case "switch":
+			// params: ( [ rev:number ] target:string recurse:bool
+			//   url:string ? depth:word send-copyfrom-args:bool
+			//   ignore-ancestry:bool )
+			//
+			// Confirmed by raw wire capture against a real "svn switch":
+			// depth/send-copyfrom-args/ignore-ancestry come right after
+			// url, not interleaved with recurse/ignore-ancestry the way
+			// "diff"'s own params are ordered.
+			if s.Switch == nil {
+				if err = replyUnimplemented(conn, command.Name); err != nil {
+					return err
+				}
+				continue
+			}
+			var args struct {
+				Rev              *uint
+				Target           string
+				Recurse          bool
+				URL              string
+				Depth            string
+				SendCopyfromArgs bool
+				IgnoreAncestry   bool
+			}
+			if err = Unmarshal(command.Params, &args); err != nil {
+				if err = conn.WriteFailure(neterr); err != nil {
+					return err
+				}
+				continue
+			}
+			s.Switch(args.Rev, args.Target, args.Recurse, args.URL, args.Depth, args.SendCopyfromArgs, args.IgnoreAncestry)
+			// empty auth-request: acked immediately, same as "update"/"diff".
+			if err = conn.WriteSuccess([]any{[]any{}, []byte{}}); err != nil {
+				return err
+			}
+		case "reparent":
+			// params: ( url:string )
+			// response: ( )
+			//
+			// Unlike "update"/"diff"/"switch", this gets a real second
+			// response beyond the empty auth-request pre-ack (confirmed by
+			// raw wire capture): a real client waits for both before
+			// sending its next command.
+			if s.Reparent == nil {
+				if err = replyUnimplemented(conn, command.Name); err != nil {
+					return err
+				}
+				continue
+			}
+			var args struct {
+				URL string
+			}
+			if err = Unmarshal(command.Params, &args); err != nil {
+				if err = conn.WriteFailure(neterr); err != nil {
+					return err
+				}
+				continue
+			}
+			if err = s.Reparent(args.URL); err != nil {
+				if err = conn.WriteFailure(err); err != nil {
+					return err
+				}
+				continue
+			}
+			if err = conn.WriteSuccess([]any{[]any{}, []byte{}}); err != nil {
+				return err
+			}
+			if err = conn.WriteSuccess([]any{}); err != nil {
 				return err
 			}
 		case "set-path": // From the Report Command Set

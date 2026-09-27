@@ -14,8 +14,8 @@ import (
 // already has something). This is the common, non-"mixed-revision"
 // shape of a working copy (one where every subtree came from the same
 // "svn update", rather than some of it being pinned to an older revision
-// with e.g. "svn update -r"), which is as far as [UpdateEdit] goes. If ok
-// is true, rev is that uniform revision.
+// with e.g. "svn update -r"), which is as far as [Server.UpdateEdit] and
+// [Server.SwitchEdit] go. If ok is true, rev is that uniform revision.
 func IsSingleRevisionUpdate(report []ReportedPath) (rev uint, ok bool) {
 	if len(report) != 1 || report[0].Path != "" || report[0].StartEmpty {
 		return 0, false
@@ -96,23 +96,53 @@ func IsSingleRevisionUpdate(report []ReportedPath) (rev uint, ok bool) {
 // empty open-dir/close-dir pairs just fine, but it's still needless
 // traffic), left as a known limitation rather than solved preemptively.
 func (s *Server) UpdateEdit(path, target string, fromRev, toRev uint) ([]Item, error) {
+	return s.diffEdit(path, path, target, fromRev, toRev)
+}
+
+// SwitchEdit builds the Editor Command Set sequence to switch a client
+// already at fromPath (at fromRev, see [IsSingleRevisionUpdate]) to
+// toPath (at toRev), for a "switch" command (see [Server.Switch]). It is
+// otherwise identical to [Server.UpdateEdit] -- indeed UpdateEdit is just
+// SwitchEdit called with the same path on both sides -- except that
+// fromPath and toPath may name two entirely different repository
+// locations (e.g. "trunk" and "branches/foo"), corresponding to each
+// other purely structurally (by name, at each level) rather than by any
+// shared history: a file present under both is compared by content/
+// revision exactly as UpdateEdit already does, a file or directory only
+// under toPath is added, and one only under fromPath is deleted, with no
+// attempt to detect a rename or otherwise use copy ancestry. target has
+// the same meaning as UpdateEdit's own (see its doc comment), navigating
+// down from both fromPath and toPath in parallel by the same segment
+// names.
+func (s *Server) SwitchEdit(fromPath, toPath, target string, fromRev, toRev uint) ([]Item, error) {
+	return s.diffEdit(fromPath, toPath, target, fromRev, toRev)
+}
+
+// diffEdit is the shared implementation behind UpdateEdit and SwitchEdit:
+// it diffs fromPath at fromRev against toPath at toRev (the same path in
+// UpdateEdit's case, two different ones in SwitchEdit's), restricted to
+// target if non-empty (see UpdateEdit's own doc comment).
+func (s *Server) diffEdit(fromPath, toPath, target string, fromRev, toRev uint) ([]Item, error) {
 	if s.List == nil || s.GetFile == nil {
-		return nil, errors.New("svn: UpdateEdit: Server.List and Server.GetFile must both be set")
+		return nil, errors.New("svn: diffEdit: Server.List and Server.GetFile must both be set")
 	}
-	toEntries, err := s.List(path, &toRev, "immediates", checkoutListFields, nil)
+	toEntries, err := s.List(toPath, &toRev, "immediates", checkoutListFields, nil)
 	if err != nil {
 		return nil, err
 	}
 	self, toChildren := splitCheckoutEntries(toEntries)
-	fromEntries, err := s.listOrEmpty(path, fromRev)
+	fromEntries, err := s.listOrEmpty(fromPath, fromRev)
 	if err != nil {
 		return nil, err
 	}
-	_, fromChildren := splitCheckoutEntries(fromEntries)
+	fromSelf, fromChildren := splitCheckoutEntries(fromEntries)
 
-	var selfPath string
+	var toSelfPath, fromSelfPath string
 	if self != nil {
-		selfPath = self.Path
+		toSelfPath = self.Path
+	}
+	if fromSelf != nil {
+		fromSelfPath = fromSelf.Path
 	}
 
 	e := NewEditorWriter()
@@ -134,12 +164,12 @@ func (s *Server) UpdateEdit(path, target string, fromRev, toRev uint) ([]Item, e
 				return nil, err
 			}
 		}
-		if err := s.updateChildren(e, path, "", selfPath, fromChildren, toChildren, fromRev, toRev); err != nil {
+		if err := s.updateChildren(e, fromPath, toPath, "", fromSelfPath, toSelfPath, fromChildren, toChildren, fromRev, toRev); err != nil {
 			return nil, err
 		}
 	} else {
 		segments := strings.Split(target, "/")
-		if err := s.updateNavigateToTarget(e, path, selfPath, fromChildren, toChildren, segments, fromRev, toRev); err != nil {
+		if err := s.updateNavigateToTarget(e, fromPath, toPath, fromSelfPath, toSelfPath, fromChildren, toChildren, segments, fromRev, toRev); err != nil {
 			return nil, err
 		}
 	}
@@ -164,7 +194,7 @@ func findChild(children []Dirent, selfPath, name string) (Dirent, bool) {
 // listOrEmpty is like s.List, but treats a "path does not exist at rev"
 // error as an empty listing rather than failing -- used for the "from"
 // side of a diff, where the whole subtree may simply not have existed
-// yet at fromRev.
+// yet at fromRev (or, for SwitchEdit, may not exist at fromPath at all).
 func (s *Server) listOrEmpty(path string, rev uint) ([]Dirent, error) {
 	entries, err := s.List(path, &rev, "immediates", checkoutListFields, nil)
 	if err != nil {
@@ -178,22 +208,25 @@ func (s *Server) listOrEmpty(path string, rev uint) ([]Dirent, error) {
 
 // updateChildren describes, under e's currently open directory, the
 // difference between fromChildren and toChildren (the already-listed
-// direct children of dirPath at fromRev and toRev respectively, both
-// children of the same directory, whose own Path is selfPath): removed
-// or kind-changed entries first, as a real svnserve orders them, then
-// every entry still present at toRev (new, modified, unchanged-but-
-// visited, or recursed into). wirePath is dirPath's equivalent relative
-// to the edit's own root; see EditorWriter's doc comment on why every
-// Editor Command Set path must be in that form, not dirPath's own
-// (session-anchor-relative) form.
-func (s *Server) updateChildren(e *EditorWriter, dirPath, wirePath, selfPath string, fromChildren, toChildren []Dirent, fromRev, toRev uint) error {
+// direct children of fromDirPath at fromRev and of toDirPath at toRev
+// respectively, whose own Path is fromSelfPath and toSelfPath
+// respectively): removed or kind-changed entries first, as a real
+// svnserve orders them, then every entry still present at toRev (new,
+// modified, unchanged-but-visited, or recursed into). fromDirPath and
+// toDirPath are equal for a plain update (see UpdateEdit) but may be
+// entirely different repository locations for a switch (see
+// SwitchEdit), corresponding to each other purely by name. wirePath is
+// toDirPath's equivalent relative to the edit's own root; see
+// EditorWriter's doc comment on why every Editor Command Set path must
+// be in that form, not toDirPath's own (session-anchor-relative) form.
+func (s *Server) updateChildren(e *EditorWriter, fromDirPath, toDirPath, wirePath, fromSelfPath, toSelfPath string, fromChildren, toChildren []Dirent, fromRev, toRev uint) error {
 	fromByName := make(map[string]Dirent, len(fromChildren))
 	for _, entry := range fromChildren {
-		fromByName[childName(entry, selfPath)] = entry
+		fromByName[childName(entry, fromSelfPath)] = entry
 	}
 	toByName := make(map[string]Dirent, len(toChildren))
 	for _, entry := range toChildren {
-		toByName[childName(entry, selfPath)] = entry
+		toByName[childName(entry, toSelfPath)] = entry
 	}
 
 	for name, from := range fromByName {
@@ -209,11 +242,12 @@ func (s *Server) updateChildren(e *EditorWriter, dirPath, wirePath, selfPath str
 	}
 
 	for _, to := range toChildren {
-		name := childName(to, selfPath)
+		name := childName(to, toSelfPath)
 		if name == "" {
 			continue
 		}
-		childDirPath := joinNonEmpty(dirPath, name)
+		childFromDirPath := joinNonEmpty(fromDirPath, name)
+		childToDirPath := joinNonEmpty(toDirPath, name)
 		childWirePath := joinNonEmpty(wirePath, name)
 		from, existed := fromByName[name]
 		isNew := !existed || from.Kind != to.Kind
@@ -230,23 +264,28 @@ func (s *Server) updateChildren(e *EditorWriter, dirPath, wirePath, selfPath str
 			if err := s.checkoutEmitEntryProps(e.ChangeDirProp, to); err != nil {
 				return err
 			}
-			toGrandEntries, err := s.List(childDirPath, &toRev, "immediates", checkoutListFields, nil)
+			toGrandEntries, err := s.List(childToDirPath, &toRev, "immediates", checkoutListFields, nil)
 			if err != nil {
 				return err
 			}
 			// to.Path (not a fresh self-lookup) is already this child's
 			// own true, repository-root-relative Path, per Server.List's
-			// contract -- reused directly as the next level's selfPath.
+			// contract -- reused directly as the next level's toSelfPath.
 			_, toGrandchildren := splitCheckoutEntries(toGrandEntries)
 			var fromGrandchildren []Dirent
+			var fromGrandSelfPath string
 			if !isNew {
-				fromGrandEntries, err := s.listOrEmpty(childDirPath, fromRev)
+				fromGrandEntries, err := s.listOrEmpty(childFromDirPath, fromRev)
 				if err != nil {
 					return err
 				}
-				_, fromGrandchildren = splitCheckoutEntries(fromGrandEntries)
+				var fromGrandSelf *Dirent
+				fromGrandSelf, fromGrandchildren = splitCheckoutEntries(fromGrandEntries)
+				if fromGrandSelf != nil {
+					fromGrandSelfPath = fromGrandSelf.Path
+				}
 			}
-			if err := s.updateChildren(e, childDirPath, childWirePath, to.Path, fromGrandchildren, toGrandchildren, fromRev, toRev); err != nil {
+			if err := s.updateChildren(e, childFromDirPath, childToDirPath, childWirePath, fromGrandSelfPath, to.Path, fromGrandchildren, toGrandchildren, fromRev, toRev); err != nil {
 				return err
 			}
 			if err := e.CloseDir(); err != nil {
@@ -255,66 +294,73 @@ func (s *Server) updateChildren(e *EditorWriter, dirPath, wirePath, selfPath str
 		case "file":
 			switch {
 			case isNew:
-				if err := s.checkoutAddFile(e, childDirPath, childWirePath, to, toRev); err != nil {
+				if err := s.checkoutAddFile(e, childToDirPath, childWirePath, to, toRev); err != nil {
 					return err
 				}
 			case to.CreatedRev == from.CreatedRev:
 				// Unchanged: a real svnserve skips it entirely, never
 				// even opening it.
 			default:
-				if err := s.updateOpenFile(e, childDirPath, childWirePath, to, fromRev, toRev); err != nil {
+				if err := s.updateOpenFile(e, childToDirPath, childWirePath, to, fromRev, toRev); err != nil {
 					return err
 				}
 			}
 		default:
-			return fmt.Errorf("svn: UpdateEdit: %s: unsupported node kind %q", childDirPath, to.Kind)
+			return fmt.Errorf("svn: diffEdit: %s: unsupported node kind %q", childToDirPath, to.Kind)
 		}
 	}
 	return nil
 }
 
 // updateNavigateToTarget finds the node reached by following segments
-// down from dirPath (already listed as fromChildren/toChildren, direct
-// children of dirPath whose own Path is selfPath), and describes only
-// that final node, directly as a child of e's currently open directory
-// (the root) -- using just its own base name as the wire path, not the
-// full path from dirPath. Every directory strictly between dirPath and
-// the target is walked, to find the target and know whether it changed,
-// but is never itself described (no open-dir/add-dir, no entry-props);
-// see UpdateEdit's own doc comment for why.
-func (s *Server) updateNavigateToTarget(e *EditorWriter, dirPath, selfPath string, fromChildren, toChildren []Dirent, segments []string, fromRev, toRev uint) error {
+// down from fromDirPath/toDirPath in parallel (already listed as
+// fromChildren/toChildren, direct children of fromDirPath/toDirPath whose
+// own Path is fromSelfPath/toSelfPath), and describes only that final
+// node, directly as a child of e's currently open directory (the root)
+// -- using just its own base name as the wire path, not the full path
+// from toDirPath. Every directory strictly between toDirPath and the
+// target is walked, to find the target and know whether it changed, but
+// is never itself described (no open-dir/add-dir, no entry-props); see
+// UpdateEdit's own doc comment for why.
+func (s *Server) updateNavigateToTarget(e *EditorWriter, fromDirPath, toDirPath, fromSelfPath, toSelfPath string, fromChildren, toChildren []Dirent, segments []string, fromRev, toRev uint) error {
 	name := segments[0]
-	to, toFound := findChild(toChildren, selfPath, name)
-	from, fromFound := findChild(fromChildren, selfPath, name)
+	to, toFound := findChild(toChildren, toSelfPath, name)
+	from, fromFound := findChild(fromChildren, fromSelfPath, name)
 
 	if !toFound {
 		if fromFound {
 			return e.DeleteEntry(name, &toRev)
 		}
-		return nil // never existed at either revision: nothing to say
+		return nil // never existed at either revision/location: nothing to say
 	}
 
-	childDirPath := joinNonEmpty(dirPath, name)
+	childFromDirPath := joinNonEmpty(fromDirPath, name)
+	childToDirPath := joinNonEmpty(toDirPath, name)
 	isNew := !fromFound || from.Kind != to.Kind
 
 	if len(segments) > 1 {
 		if to.Kind != "dir" {
-			return fmt.Errorf("svn: UpdateEdit: %s: not a directory", childDirPath)
+			return fmt.Errorf("svn: diffEdit: %s: not a directory", childToDirPath)
 		}
-		toGrandEntries, err := s.List(childDirPath, &toRev, "immediates", checkoutListFields, nil)
+		toGrandEntries, err := s.List(childToDirPath, &toRev, "immediates", checkoutListFields, nil)
 		if err != nil {
 			return err
 		}
 		_, toGrandchildren := splitCheckoutEntries(toGrandEntries)
 		var fromGrandchildren []Dirent
+		var fromGrandSelfPath string
 		if !isNew {
-			fromGrandEntries, err := s.listOrEmpty(childDirPath, fromRev)
+			fromGrandEntries, err := s.listOrEmpty(childFromDirPath, fromRev)
 			if err != nil {
 				return err
 			}
-			_, fromGrandchildren = splitCheckoutEntries(fromGrandEntries)
+			var fromGrandSelf *Dirent
+			fromGrandSelf, fromGrandchildren = splitCheckoutEntries(fromGrandEntries)
+			if fromGrandSelf != nil {
+				fromGrandSelfPath = fromGrandSelf.Path
+			}
 		}
-		return s.updateNavigateToTarget(e, childDirPath, to.Path, fromGrandchildren, toGrandchildren, segments[1:], fromRev, toRev)
+		return s.updateNavigateToTarget(e, childFromDirPath, childToDirPath, fromGrandSelfPath, to.Path, fromGrandchildren, toGrandchildren, segments[1:], fromRev, toRev)
 	}
 
 	// The target itself: describe it as a direct child of the root,
@@ -333,34 +379,39 @@ func (s *Server) updateNavigateToTarget(e *EditorWriter, dirPath, selfPath strin
 		if err := s.checkoutEmitEntryProps(e.ChangeDirProp, to); err != nil {
 			return err
 		}
-		toGrandEntries, err := s.List(childDirPath, &toRev, "immediates", checkoutListFields, nil)
+		toGrandEntries, err := s.List(childToDirPath, &toRev, "immediates", checkoutListFields, nil)
 		if err != nil {
 			return err
 		}
 		_, toGrandchildren := splitCheckoutEntries(toGrandEntries)
 		var fromGrandchildren []Dirent
+		var fromGrandSelfPath string
 		if !isNew {
-			fromGrandEntries, err := s.listOrEmpty(childDirPath, fromRev)
+			fromGrandEntries, err := s.listOrEmpty(childFromDirPath, fromRev)
 			if err != nil {
 				return err
 			}
-			_, fromGrandchildren = splitCheckoutEntries(fromGrandEntries)
+			var fromGrandSelf *Dirent
+			fromGrandSelf, fromGrandchildren = splitCheckoutEntries(fromGrandEntries)
+			if fromGrandSelf != nil {
+				fromGrandSelfPath = fromGrandSelf.Path
+			}
 		}
-		if err := s.updateChildren(e, childDirPath, name, to.Path, fromGrandchildren, toGrandchildren, fromRev, toRev); err != nil {
+		if err := s.updateChildren(e, childFromDirPath, childToDirPath, name, fromGrandSelfPath, to.Path, fromGrandchildren, toGrandchildren, fromRev, toRev); err != nil {
 			return err
 		}
 		return e.CloseDir()
 	case "file":
 		switch {
 		case isNew:
-			return s.checkoutAddFile(e, childDirPath, name, to, toRev)
+			return s.checkoutAddFile(e, childToDirPath, name, to, toRev)
 		case to.CreatedRev == from.CreatedRev:
 			return nil // unchanged: skip it entirely, like updateChildren does
 		default:
-			return s.updateOpenFile(e, childDirPath, name, to, fromRev, toRev)
+			return s.updateOpenFile(e, childToDirPath, name, to, fromRev, toRev)
 		}
 	default:
-		return fmt.Errorf("svn: UpdateEdit: %s: unsupported node kind %q", childDirPath, to.Kind)
+		return fmt.Errorf("svn: diffEdit: %s: unsupported node kind %q", childToDirPath, to.Kind)
 	}
 }
 
@@ -381,6 +432,9 @@ func joinNonEmpty(a, b string) string {
 // OpenFile (not AddFile) at fromRev, followed by its (resent, since a
 // real svnserve does the same even for a file it isn't adding) entry
 // properties, its new content, and a close with the new checksum.
+// dirPath (the file's new location, toDirPath in the caller's terms) is
+// what its content is read from, at toRev -- fromRev is only used as the
+// wire revision OpenFile announces as the client's own baseline.
 func (s *Server) updateOpenFile(e *EditorWriter, dirPath, wirePath string, entry Dirent, fromRev, toRev uint) error {
 	_, _, content, err := s.GetFile(dirPath, &toRev, false, true)
 	if err != nil {
