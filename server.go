@@ -176,6 +176,14 @@ type Server struct {
 	FinishReport func(paths []ReportedPath) ([]Item, error)
 }
 
+// errMalformedNetworkData is the failure Serve reports when it can't
+// unmarshal a command's own params -- confirmed against a real svnserve
+// to use this exact code/message for that case.
+var errMalformedNetworkData = Error{
+	AprErr:  210004,
+	Message: "Malformed network data",
+}
+
 // Serve sends and receives SVN messages against a client,
 // issuing calls to the respective functions when a message
 // is received.
@@ -294,623 +302,566 @@ func (s *Server) Serve(r io.Reader, w io.Writer) error {
 		if err != nil {
 			return err
 		}
-		neterr := Error{
-			AprErr:  210004,
-			Message: "Malformed network data",
-		}
 		// log.Printf("server received command %q %v\n", command.Name, command.Params)
 		switch command.Name {
 		case "get-latest-rev":
-			if s.GetLatestRev == nil {
-				if err = replyUnimplemented(conn, command.Name); err != nil {
-					return err
-				}
-				continue
-			}
-			rev, err := s.GetLatestRev()
-			if err != nil {
-				if err = conn.WriteFailure(err); err != nil {
-					return err
-				}
-				continue
-			}
-			// empty auth-request:
-			if err = conn.WriteSuccess([]any{[]any{}, []byte{}}); err != nil {
-				return err
-			}
-			if err = conn.WriteSuccess([]any{rev}); err != nil {
-				return err
-			}
+			err = s.handleGetLatestRev(conn)
 		case "stat":
-			// params: ( path:string [ rev:number ] )
-			if s.Stat == nil {
-				if err = replyUnimplemented(conn, command.Name); err != nil {
-					return err
-				}
-				continue
-			}
-			var args struct {
-				Path string
-				Rev  *uint
-			}
-			if err = Unmarshal(command.Params, &args); err != nil {
-				if err = conn.WriteFailure(neterr); err != nil {
-					return err
-				}
-				continue
-			}
-			entry, err := s.Stat(args.Path, args.Rev)
-			if err != nil {
-				if errors.Is(err, fs.ErrNotExist) {
-					// A real svnserve reports a nonexistent path as a
-					// successful response, not a failure -- Stat callbacks
-					// signal this the same way [Client.Stat] itself does,
-					// by returning an error satisfying
-					// errors.Is(err, fs.ErrNotExist).
-					if err = conn.WriteSuccess([]any{[]any{}, []byte{}}); err != nil {
-						return err
-					}
-					// response: ( ? entry:dirent ). The tuple always has
-					// exactly one slot; an absent optional is that slot
-					// holding an empty list ( ( ) ), not the tuple itself
-					// having zero elements ( ) -- confirmed against a real
-					// svn client, which rejects the latter as malformed
-					// (see TestServerAgainstRealSVNClient's "info on
-					// nonexistent path" subtest).
-					if err = conn.WriteSuccess([]any{[]any{}}); err != nil {
-						return err
-					}
-					continue
-				}
-				if err = conn.WriteFailure(err); err != nil {
-					return err
-				}
-				continue
-			}
-			if err = conn.WriteSuccess([]any{[]any{}, []byte{}}); err != nil {
-				return err
-			}
-			// response: ( ? entry:dirent ). A "?"/optional marker always
-			// wraps whatever it marks in its own 0-or-1-element list; since
-			// "entry" here is itself a compound dirent tuple (which is
-			// naturally its own list), a present entry ends up nested two
-			// levels deep. Confirmed against a real svnserve's own wire
-			// response, which sends exactly this shape.
-			if err = conn.WriteSuccess([]any{[]any{[]any{
-				entry.Kind,
-				entry.Size,
-				entry.HasProps,
-				entry.CreatedRev,
-				[]any{[]byte(entry.CreatedDate)},
-				[]any{[]byte(entry.LastAuthor)},
-			}}}); err != nil {
-				return err
-			}
+			err = s.handleStat(conn, command.Params)
 		case "list":
-			// params: ( path:string [ rev:number ] depth:word ( field:dirent-field ... ) ? ( pattern:string ... ) )
-			if s.List == nil {
-				if err = replyUnimplemented(conn, command.Name); err != nil {
-					return err
-				}
-				continue
-			}
-			var args struct {
-				Path    string
-				Rev     *uint
-				Depth   string
-				Fields  []string
-				Pattern []string
-			}
-			if err = Unmarshal(command.Params, &args); err != nil {
-				if err = conn.WriteFailure(neterr); err != nil {
-					return err
-				}
-				continue
-			}
-			dirents, err := s.List(args.Path, args.Rev, args.Depth, args.Fields, args.Pattern)
-			if err != nil {
-				if err = conn.WriteFailure(err); err != nil {
-					return err
-				}
-				continue
-			}
-			if err = conn.WriteSuccess([]any{[]any{}, []byte{}}); err != nil {
-				return err
-			}
-			for _, d := range dirents {
-				if err = conn.Write([]any{
-					[]byte(d.Path),
-					d.Kind,
-					[]any{d.Size},
-					[]any{d.HasProps},
-					[]any{d.CreatedRev},
-					[]any{[]byte(d.CreatedDate)},
-					[]any{[]byte(d.LastAuthor)},
-				}); err != nil {
-					return err
-				}
-			}
-			if err = conn.Write("done"); err != nil {
-				return err
-			}
-			if err = conn.WriteSuccess([]any{}); err != nil {
-				return err
-			}
+			err = s.handleList(conn, command.Params)
 		case "get-dir":
-			// params: ( path:string [ rev:number ] want-props:bool
-			//   want-contents:bool ? ( field:dirent-field ... )
-			//   ? want-iprops:bool )
-			// response: ( rev:number props:proplist ( entry:dirent ... )
-			//   [ inherited-props:iproplist ] )
-			// dirent: ( name:string kind:word size:number has-props:bool
-			//   created-rev:number [ created-date:string ]
-			//   [ last-author:string ] )
-			//
-			// The older, pre-"list" way to read a directory's children.
-			// A modern client generally uses "list" instead (see
-			// Server.List's own doc comment), but "svn diff" still falls
-			// back to this to enumerate a deleted directory's former
-			// contents, so it can describe every file that disappeared
-			// along with it -- confirmed by a real client sending this
-			// in exactly that situation, despite this package always
-			// advertising the "list" capability. Answered entirely in
-			// terms of Server.List: a directory's own properties are
-			// always reported empty (the same simplification
-			// "get-iprops" already makes), and, unlike "list", every
-			// dirent field is always populated, regardless of which
-			// ones the client actually asked for.
-			if s.List == nil {
-				if err = replyUnimplemented(conn, command.Name); err != nil {
-					return err
-				}
-				continue
-			}
-			var args struct {
-				Path         string
-				Rev          *uint
-				WantProps    bool
-				WantContents bool
-				Fields       []string
-				WantIProps   bool
-			}
-			if err = Unmarshal(command.Params, &args); err != nil {
-				if err = conn.WriteFailure(neterr); err != nil {
-					return err
-				}
-				continue
-			}
-			entries, err := s.List(args.Path, args.Rev, "immediates",
-				[]string{"kind", "size", "created-rev", "time", "last-author"}, nil)
-			if err != nil {
-				if err = conn.WriteFailure(err); err != nil {
-					return err
-				}
-				continue
-			}
-			self, children := splitCheckoutEntries(entries)
-			var dirRev uint
-			var selfPath string
-			if self != nil {
-				dirRev = self.CreatedRev
-				selfPath = self.Path
-			}
-			dirents := []any{}
-			if args.WantContents {
-				for _, c := range children {
-					dirents = append(dirents, []any{
-						[]byte(childName(c, selfPath)),
-						c.Kind,
-						c.Size,
-						c.HasProps,
-						c.CreatedRev,
-						[]any{[]byte(c.CreatedDate)},
-						[]any{[]byte(c.LastAuthor)},
-					})
-				}
-			}
-			if err = conn.WriteSuccess([]any{[]any{}, []byte{}}); err != nil {
-				return err
-			}
-			if err = conn.WriteSuccess([]any{dirRev, []any{}, dirents}); err != nil {
-				return err
-			}
+			err = s.handleGetDir(conn, command.Params)
 		case "check-path":
-			// params: ( path:string [ rev:number ] )
-			if s.CheckPath == nil {
-				if err = replyUnimplemented(conn, command.Name); err != nil {
-					return err
-				}
-				continue
-			}
-			var args struct {
-				Path string
-				Rev  *uint
-			}
-			if err = Unmarshal(command.Params, &args); err != nil {
-				if err = conn.WriteFailure(neterr); err != nil {
-					return err
-				}
-				continue
-			}
-			kind, err := s.CheckPath(args.Path, args.Rev)
-			if err != nil {
-				if err = conn.WriteFailure(err); err != nil {
-					return err
-				}
-				continue
-			}
-			if err = conn.WriteSuccess([]any{[]any{}, []byte{}}); err != nil {
-				return err
-			}
-			if err = conn.WriteSuccess([]any{kind}); err != nil {
-				return err
-			}
+			err = s.handleCheckPath(conn, command.Params)
 		case "get-iprops":
-			// params: ( path:string [ rev:number ] )
-			// response: ( inherited-props:iproplist )
-			//
-			// Inherited properties (a path's ancestor directories'
-			// properties, e.g. svn:auto-props set higher up the tree)
-			// aren't modeled anywhere in this package -- List/GetFile
-			// have no notion of a directory's own properties at all --
-			// so this always reports none. Unlike every other command
-			// here, it isn't gated behind a nil-able callback field: a
-			// real client needs some answer to it to complete even a
-			// plain checkout of a path below the repository root
-			// (confirmed: it otherwise fails outright with "E210001:
-			// Unknown command 'get-iprops'", which is exactly how this
-			// case was found).
-			var args struct {
-				Path string
-				Rev  *uint
-			}
-			if err = Unmarshal(command.Params, &args); err != nil {
-				if err = conn.WriteFailure(neterr); err != nil {
-					return err
-				}
-				continue
-			}
-			// empty auth-request:
-			if err = conn.WriteSuccess([]any{[]any{}, []byte{}}); err != nil {
-				return err
-			}
-			if err = conn.WriteSuccess([]any{[]any{}}); err != nil {
-				return err
-			}
+			err = s.handleGetIProps(conn, command.Params)
 		case "get-file":
-			// params: ( path:string [ rev:number ] want-props:bool want-contents:bool ? want-iprops:bool )
-			if s.GetFile == nil {
-				if err = replyUnimplemented(conn, command.Name); err != nil {
-					return err
-				}
-				continue
-			}
-			var args struct {
-				Path         string
-				Rev          *uint
-				WantProps    bool
-				WantContents bool
-			}
-			if err = Unmarshal(command.Params, &args); err != nil {
-				if err = conn.WriteFailure(neterr); err != nil {
-					return err
-				}
-				continue
-			}
-			rev, proplist, contents, err := s.GetFile(args.Path, args.Rev, args.WantProps, args.WantContents)
-			if err != nil {
-				if err = conn.WriteFailure(err); err != nil {
-					return err
-				}
-				continue
-			}
-			checksum := []byte(fmt.Sprintf("%x", md5.Sum(contents)))
-			if err = conn.WriteSuccess([]any{[]any{}, []byte{}}); err != nil {
-				return err
-			}
-			if err = conn.WriteSuccess([]any{[]any{checksum}, rev, proplist}); err != nil {
-				return err
-			}
-			if args.WantContents {
-				if err = conn.Write(contents); err != nil {
-					return err
-				}
-				if err = conn.Write([]byte{}); err != nil {
-					return err
-				}
-				if err = conn.WriteSuccess([]any{}); err != nil {
-					return err
-				}
-			}
+			err = s.handleGetFile(conn, command.Params)
 		case "log":
-			// params: ( ( target-path:string ... ) [ start-rev:number ] [ end-rev:number ] changed-paths:bool strict-node:bool ? limit:number ? include-merged-revisions:bool all-revprops | revprops ( revprop:string ... ) )
-			if s.Log == nil {
-				if err = replyUnimplemented(conn, command.Name); err != nil {
-					return err
-				}
-				continue
-			}
-			var args struct {
-				Paths                  []string
-				StartRev               uint
-				EndRev                 uint
-				ChangedPaths           bool
-				StrictNode             bool
-				Limit                  int
-				IncludeMergedRevisions bool
-				RevpropsType           string
-				Revprops               []string
-			}
-			if err = Unmarshal(command.Params, &args); err != nil {
-				if err = conn.WriteFailure(neterr); err != nil {
-					return err
-				}
-				continue
-			}
-			logEntries, err := s.Log(args.Paths, args.StartRev, args.EndRev, args.ChangedPaths)
-			if err != nil {
-				if err = conn.WriteFailure(err); err != nil {
-					return err
-				}
-				continue
-			}
-			if err = conn.WriteSuccess([]any{[]any{}, []byte{}}); err != nil {
-				return err
-			}
-			for _, l := range logEntries {
-				// changed-path-entry: ( path:string mode:word
-				//   ? ( copy-path:string copy-rev:number )
-				//   ? ( node-kind:string text-mods:bool prop-mods:bool ) )
-				// Built by hand, rather than left to Marshal, because
-				// Path/CopyPath are plain Go strings for callers'
-				// convenience: Marshal would encode those as words,
-				// which breaks (confirmed against a real svnserve) as
-				// soon as a path contains a character a bare word can't
-				// hold, like '/'.
-				var changed []any
-				for _, cp := range l.Changed {
-					var copyGroup any = []any{}
-					if cp.Copy != nil {
-						copyGroup = []any{[]byte(cp.Copy.Path), cp.Copy.Rev}
-					}
-					var infoGroup any = []any{}
-					if cp.Info != nil {
-						infoGroup = []any{[]byte(cp.Info.NodeKind), cp.Info.TextMods, cp.Info.PropMods}
-					}
-					changed = append(changed, []any{
-						[]byte(cp.Path),
-						cp.Mode,
-						copyGroup,
-						infoGroup,
-					})
-				}
-				if err = conn.Write([]any{
-					changed,
-					l.Rev,
-					[]any{[]byte(l.Author)},
-					[]any{[]byte(l.Date)},
-					[]any{[]byte(l.Message)},
-				}); err != nil {
-					return err
-				}
-			}
-			if err = conn.Write("done"); err != nil {
-				return err
-			}
-			if err = conn.WriteSuccess([]any{}); err != nil {
-				return err
-			}
+			err = s.handleLog(conn, command.Params)
 		case "update":
-			if s.Update == nil {
-				if err = replyUnimplemented(conn, command.Name); err != nil {
-					return err
-				}
-				continue
-			}
-			var args struct {
-				Rev     *uint
-				Target  string
-				Recurse bool
-			}
-			if err = Unmarshal(command.Params, &args); err != nil {
-				if err = conn.WriteFailure(neterr); err != nil {
-					return err
-				}
-				continue
-			}
-			s.Update(args.Rev, args.Target, args.Recurse)
-			// empty auth-request:
-			if err = conn.WriteSuccess([]any{[]any{}, []byte{}}); err != nil {
-				return err
-			}
+			err = s.handleUpdate(conn, command.Params)
 		case "diff":
-			// params: ( [ rev:number ] target:string recurse:bool
-			//   ignore-ancestry:bool url:string ? text-deltas:bool
-			//   ? depth:word )
-			if s.Diff == nil {
-				if err = replyUnimplemented(conn, command.Name); err != nil {
-					return err
-				}
-				continue
-			}
-			var args struct {
-				Rev            *uint
-				Target         string
-				Recurse        bool
-				IgnoreAncestry bool
-				VersusURL      string
-				TextDeltas     bool
-				Depth          string
-			}
-			if err = Unmarshal(command.Params, &args); err != nil {
-				if err = conn.WriteFailure(neterr); err != nil {
-					return err
-				}
-				continue
-			}
-			s.Diff(args.Rev, args.Target, args.Recurse, args.IgnoreAncestry, args.VersusURL, args.TextDeltas, args.Depth)
-			// empty auth-request: acked immediately, exactly like
-			// "update" -- confirmed by raw wire capture, reading right
-			// after sending "diff" and before sending "set-path" (a
-			// first attempt assumed this ack was deferred until
-			// "finish-report", from a capture that sent set-path and
-			// finish-report before reading anything at all, which
-			// couldn't actually tell the two apart; a real client left
-			// waiting for this ack immediately, since it never comes
-			// with that assumption, is what caught the mistake).
-			if err = conn.WriteSuccess([]any{[]any{}, []byte{}}); err != nil {
-				return err
-			}
+			err = s.handleDiff(conn, command.Params)
 		case "switch":
-			// params: ( [ rev:number ] target:string recurse:bool
-			//   url:string ? depth:word send-copyfrom-args:bool
-			//   ignore-ancestry:bool )
-			//
-			// Confirmed by raw wire capture against a real "svn switch":
-			// depth/send-copyfrom-args/ignore-ancestry come right after
-			// url, not interleaved with recurse/ignore-ancestry the way
-			// "diff"'s own params are ordered.
-			if s.Switch == nil {
-				if err = replyUnimplemented(conn, command.Name); err != nil {
-					return err
-				}
-				continue
-			}
-			var args struct {
-				Rev              *uint
-				Target           string
-				Recurse          bool
-				URL              string
-				Depth            string
-				SendCopyfromArgs bool
-				IgnoreAncestry   bool
-			}
-			if err = Unmarshal(command.Params, &args); err != nil {
-				if err = conn.WriteFailure(neterr); err != nil {
-					return err
-				}
-				continue
-			}
-			s.Switch(args.Rev, args.Target, args.Recurse, args.URL, args.Depth, args.SendCopyfromArgs, args.IgnoreAncestry)
-			// empty auth-request: acked immediately, same as "update"/"diff".
-			if err = conn.WriteSuccess([]any{[]any{}, []byte{}}); err != nil {
-				return err
-			}
+			err = s.handleSwitch(conn, command.Params)
 		case "reparent":
-			// params: ( url:string )
-			// response: ( )
-			//
-			// Unlike "update"/"diff"/"switch", this gets a real second
-			// response beyond the empty auth-request pre-ack (confirmed by
-			// raw wire capture): a real client waits for both before
-			// sending its next command.
-			if s.Reparent == nil {
-				if err = replyUnimplemented(conn, command.Name); err != nil {
-					return err
-				}
-				continue
-			}
-			var args struct {
-				URL string
-			}
-			if err = Unmarshal(command.Params, &args); err != nil {
-				if err = conn.WriteFailure(neterr); err != nil {
-					return err
-				}
-				continue
-			}
-			if err = s.Reparent(args.URL); err != nil {
-				if err = conn.WriteFailure(err); err != nil {
-					return err
-				}
-				continue
-			}
-			if err = conn.WriteSuccess([]any{[]any{}, []byte{}}); err != nil {
-				return err
-			}
-			if err = conn.WriteSuccess([]any{}); err != nil {
-				return err
-			}
+			err = s.handleReparent(conn, command.Params)
 		case "set-path": // From the Report Command Set
-			var args struct {
-				Path       string
-				Rev        uint
-				StartEmpty bool
-			}
-			if err = Unmarshal(command.Params, &args); err != nil {
-				if err = conn.WriteFailure(neterr); err != nil {
-					return err
-				}
-				continue
-			}
-			report = append(report, ReportedPath{
-				Path: args.Path, Rev: args.Rev, StartEmpty: args.StartEmpty,
-			})
-			if s.SetPath != nil {
-				s.SetPath(args.Path, args.Rev, args.StartEmpty)
-			}
-			// no response in set-path
+			err = s.handleSetPath(conn, command.Params, &report)
 		case "finish-report": // From the Report Command Set
-			if s.FinishReport == nil {
-				report = nil
-				if err = replyUnimplemented(conn, command.Name); err != nil {
-					return err
-				}
-				continue
-			}
-			// no response?
-			if err = conn.WriteSuccess([]any{[]any{}, []byte{}}); err != nil {
-				return err
-			}
-			items, err := s.FinishReport(report)
-			report = nil
-			if err != nil {
-				if err = conn.Write([]any{"abort-edit", []any{}}); err != nil {
-					return err
-				}
-				// The client acks abort-edit the same way it acks
-				// close-edit below: read that ack before the final
-				// response to "finish-report" itself, or it's left
-				// unread and desyncs the connection -- the next thing
-				// the client sends gets misread as a bogus command
-				// (confirmed against a real svn client, which sends
-				// exactly this ack and then fails with "Unknown command
-				// 'success'" once desynced this way).
-				if err = conn.ReadResponse(&item); err != nil {
-					return err
-				}
-				if err = conn.WriteSuccess([]any{}); err != nil {
-					return err
-				}
-				continue
-			}
-			for _, i := range items {
-				if err = conn.Write(i); err != nil {
-					return err
-				}
-			}
-			if err = conn.Write([]any{"close-edit", []any{}}); err != nil {
-				return err
-			}
-			err = conn.ReadResponse(&item)
-			if err != nil {
-				return err
-			}
-			err = conn.WriteSuccess([]any{})
-			if err != nil {
-				return err
-			}
+			err = s.handleFinishReport(conn, &report)
 		default:
-			if err = conn.WriteFailure(Error{
+			err = conn.WriteFailure(Error{
 				AprErr:  210001,
 				Message: fmt.Sprintf("Unknown command '%s'", command.Name),
-			}); err != nil {
-				return err
-			}
+			})
 			// ( failure ( ( 210001 34:Unknown editor command 'no-existe' 0: 0 ) ) )
-			// return fmt.Errorf("unknown command %q", command.Name)
+		}
+		if err != nil {
+			return err
 		}
 	}
+}
+
+// handleGetLatestRev answers a "get-latest-rev" command.
+func (s *Server) handleGetLatestRev(conn conn) error {
+	if s.GetLatestRev == nil {
+		return replyUnimplemented(conn, "get-latest-rev")
+	}
+	rev, err := s.GetLatestRev()
+	if err != nil {
+		return conn.WriteFailure(err)
+	}
+	// empty auth-request:
+	if err := conn.WriteSuccess([]any{[]any{}, []byte{}}); err != nil {
+		return err
+	}
+	return conn.WriteSuccess([]any{rev})
+}
+
+// handleStat answers a "stat" command.
+// params: ( path:string [ rev:number ] )
+func (s *Server) handleStat(conn conn, params Item) error {
+	if s.Stat == nil {
+		return replyUnimplemented(conn, "stat")
+	}
+	var args struct {
+		Path string
+		Rev  *uint
+	}
+	if err := Unmarshal(params, &args); err != nil {
+		return conn.WriteFailure(errMalformedNetworkData)
+	}
+	entry, err := s.Stat(args.Path, args.Rev)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			// A real svnserve reports a nonexistent path as a
+			// successful response, not a failure -- Stat callbacks
+			// signal this the same way [Client.Stat] itself does,
+			// by returning an error satisfying
+			// errors.Is(err, fs.ErrNotExist).
+			if err := conn.WriteSuccess([]any{[]any{}, []byte{}}); err != nil {
+				return err
+			}
+			// response: ( ? entry:dirent ). The tuple always has
+			// exactly one slot; an absent optional is that slot
+			// holding an empty list ( ( ) ), not the tuple itself
+			// having zero elements ( ) -- confirmed against a real
+			// svn client, which rejects the latter as malformed
+			// (see TestServerAgainstRealSVNClient's "info on
+			// nonexistent path" subtest).
+			return conn.WriteSuccess([]any{[]any{}})
+		}
+		return conn.WriteFailure(err)
+	}
+	if err := conn.WriteSuccess([]any{[]any{}, []byte{}}); err != nil {
+		return err
+	}
+	// response: ( ? entry:dirent ). A "?"/optional marker always
+	// wraps whatever it marks in its own 0-or-1-element list; since
+	// "entry" here is itself a compound dirent tuple (which is
+	// naturally its own list), a present entry ends up nested two
+	// levels deep. Confirmed against a real svnserve's own wire
+	// response, which sends exactly this shape.
+	return conn.WriteSuccess([]any{[]any{[]any{
+		entry.Kind,
+		entry.Size,
+		entry.HasProps,
+		entry.CreatedRev,
+		[]any{[]byte(entry.CreatedDate)},
+		[]any{[]byte(entry.LastAuthor)},
+	}}})
+}
+
+// handleList answers a "list" command.
+// params: ( path:string [ rev:number ] depth:word ( field:dirent-field ... ) ? ( pattern:string ... ) )
+func (s *Server) handleList(conn conn, params Item) error {
+	if s.List == nil {
+		return replyUnimplemented(conn, "list")
+	}
+	var args struct {
+		Path    string
+		Rev     *uint
+		Depth   string
+		Fields  []string
+		Pattern []string
+	}
+	if err := Unmarshal(params, &args); err != nil {
+		return conn.WriteFailure(errMalformedNetworkData)
+	}
+	dirents, err := s.List(args.Path, args.Rev, args.Depth, args.Fields, args.Pattern)
+	if err != nil {
+		return conn.WriteFailure(err)
+	}
+	if err := conn.WriteSuccess([]any{[]any{}, []byte{}}); err != nil {
+		return err
+	}
+	for _, d := range dirents {
+		if err := conn.Write([]any{
+			[]byte(d.Path),
+			d.Kind,
+			[]any{d.Size},
+			[]any{d.HasProps},
+			[]any{d.CreatedRev},
+			[]any{[]byte(d.CreatedDate)},
+			[]any{[]byte(d.LastAuthor)},
+		}); err != nil {
+			return err
+		}
+	}
+	if err := conn.Write("done"); err != nil {
+		return err
+	}
+	return conn.WriteSuccess([]any{})
+}
+
+// handleGetDir answers a "get-dir" command.
+// params: ( path:string [ rev:number ] want-props:bool
+//
+//	want-contents:bool ? ( field:dirent-field ... )
+//	? want-iprops:bool )
+//
+// response: ( rev:number props:proplist ( entry:dirent ... )
+//
+//	[ inherited-props:iproplist ] )
+//
+// dirent: ( name:string kind:word size:number has-props:bool
+//
+//	created-rev:number [ created-date:string ]
+//	[ last-author:string ] )
+//
+// The older, pre-"list" way to read a directory's children. A modern
+// client generally uses "list" instead (see Server.List's own doc
+// comment), but "svn diff" still falls back to this to enumerate a
+// deleted directory's former contents, so it can describe every file
+// that disappeared along with it -- confirmed by a real client sending
+// this in exactly that situation, despite this package always
+// advertising the "list" capability. Answered entirely in terms of
+// Server.List: a directory's own properties are always reported empty
+// (the same simplification "get-iprops" already makes), and, unlike
+// "list", every dirent field is always populated, regardless of which
+// ones the client actually asked for.
+func (s *Server) handleGetDir(conn conn, params Item) error {
+	if s.List == nil {
+		return replyUnimplemented(conn, "get-dir")
+	}
+	var args struct {
+		Path         string
+		Rev          *uint
+		WantProps    bool
+		WantContents bool
+		Fields       []string
+		WantIProps   bool
+	}
+	if err := Unmarshal(params, &args); err != nil {
+		return conn.WriteFailure(errMalformedNetworkData)
+	}
+	entries, err := s.List(args.Path, args.Rev, "immediates",
+		[]string{"kind", "size", "created-rev", "time", "last-author"}, nil)
+	if err != nil {
+		return conn.WriteFailure(err)
+	}
+	self, children := splitCheckoutEntries(entries)
+	var dirRev uint
+	var selfPath string
+	if self != nil {
+		dirRev = self.CreatedRev
+		selfPath = self.Path
+	}
+	dirents := []any{}
+	if args.WantContents {
+		for _, c := range children {
+			dirents = append(dirents, []any{
+				[]byte(childName(c, selfPath)),
+				c.Kind,
+				c.Size,
+				c.HasProps,
+				c.CreatedRev,
+				[]any{[]byte(c.CreatedDate)},
+				[]any{[]byte(c.LastAuthor)},
+			})
+		}
+	}
+	if err := conn.WriteSuccess([]any{[]any{}, []byte{}}); err != nil {
+		return err
+	}
+	return conn.WriteSuccess([]any{dirRev, []any{}, dirents})
+}
+
+// handleCheckPath answers a "check-path" command.
+// params: ( path:string [ rev:number ] )
+func (s *Server) handleCheckPath(conn conn, params Item) error {
+	if s.CheckPath == nil {
+		return replyUnimplemented(conn, "check-path")
+	}
+	var args struct {
+		Path string
+		Rev  *uint
+	}
+	if err := Unmarshal(params, &args); err != nil {
+		return conn.WriteFailure(errMalformedNetworkData)
+	}
+	kind, err := s.CheckPath(args.Path, args.Rev)
+	if err != nil {
+		return conn.WriteFailure(err)
+	}
+	if err := conn.WriteSuccess([]any{[]any{}, []byte{}}); err != nil {
+		return err
+	}
+	return conn.WriteSuccess([]any{kind})
+}
+
+// handleGetIProps answers a "get-iprops" command.
+// params: ( path:string [ rev:number ] )
+// response: ( inherited-props:iproplist )
+//
+// Inherited properties (a path's ancestor directories' properties, e.g.
+// svn:auto-props set higher up the tree) aren't modeled anywhere in this
+// package -- List/GetFile have no notion of a directory's own properties
+// at all -- so this always reports none. Unlike every other command
+// here, it isn't gated behind a nil-able callback field: a real client
+// needs some answer to it to complete even a plain checkout of a path
+// below the repository root (confirmed: it otherwise fails outright with
+// "E210001: Unknown command 'get-iprops'", which is exactly how this
+// case was found).
+func (s *Server) handleGetIProps(conn conn, params Item) error {
+	var args struct {
+		Path string
+		Rev  *uint
+	}
+	if err := Unmarshal(params, &args); err != nil {
+		return conn.WriteFailure(errMalformedNetworkData)
+	}
+	// empty auth-request:
+	if err := conn.WriteSuccess([]any{[]any{}, []byte{}}); err != nil {
+		return err
+	}
+	return conn.WriteSuccess([]any{[]any{}})
+}
+
+// handleGetFile answers a "get-file" command.
+// params: ( path:string [ rev:number ] want-props:bool want-contents:bool ? want-iprops:bool )
+func (s *Server) handleGetFile(conn conn, params Item) error {
+	if s.GetFile == nil {
+		return replyUnimplemented(conn, "get-file")
+	}
+	var args struct {
+		Path         string
+		Rev          *uint
+		WantProps    bool
+		WantContents bool
+	}
+	if err := Unmarshal(params, &args); err != nil {
+		return conn.WriteFailure(errMalformedNetworkData)
+	}
+	rev, proplist, contents, err := s.GetFile(args.Path, args.Rev, args.WantProps, args.WantContents)
+	if err != nil {
+		return conn.WriteFailure(err)
+	}
+	checksum := []byte(fmt.Sprintf("%x", md5.Sum(contents)))
+	if err := conn.WriteSuccess([]any{[]any{}, []byte{}}); err != nil {
+		return err
+	}
+	if err := conn.WriteSuccess([]any{[]any{checksum}, rev, proplist}); err != nil {
+		return err
+	}
+	if args.WantContents {
+		if err := conn.Write(contents); err != nil {
+			return err
+		}
+		if err := conn.Write([]byte{}); err != nil {
+			return err
+		}
+		return conn.WriteSuccess([]any{})
+	}
+	return nil
+}
+
+// handleLog answers a "log" command.
+// params: ( ( target-path:string ... ) [ start-rev:number ] [ end-rev:number ] changed-paths:bool strict-node:bool ? limit:number ? include-merged-revisions:bool all-revprops | revprops ( revprop:string ... ) )
+func (s *Server) handleLog(conn conn, params Item) error {
+	if s.Log == nil {
+		return replyUnimplemented(conn, "log")
+	}
+	var args struct {
+		Paths                  []string
+		StartRev               uint
+		EndRev                 uint
+		ChangedPaths           bool
+		StrictNode             bool
+		Limit                  int
+		IncludeMergedRevisions bool
+		RevpropsType           string
+		Revprops               []string
+	}
+	if err := Unmarshal(params, &args); err != nil {
+		return conn.WriteFailure(errMalformedNetworkData)
+	}
+	logEntries, err := s.Log(args.Paths, args.StartRev, args.EndRev, args.ChangedPaths)
+	if err != nil {
+		return conn.WriteFailure(err)
+	}
+	if err := conn.WriteSuccess([]any{[]any{}, []byte{}}); err != nil {
+		return err
+	}
+	for _, l := range logEntries {
+		// changed-path-entry: ( path:string mode:word
+		//   ? ( copy-path:string copy-rev:number )
+		//   ? ( node-kind:string text-mods:bool prop-mods:bool ) )
+		// Built by hand, rather than left to Marshal, because
+		// Path/CopyPath are plain Go strings for callers'
+		// convenience: Marshal would encode those as words,
+		// which breaks (confirmed against a real svnserve) as
+		// soon as a path contains a character a bare word can't
+		// hold, like '/'.
+		var changed []any
+		for _, cp := range l.Changed {
+			var copyGroup any = []any{}
+			if cp.Copy != nil {
+				copyGroup = []any{[]byte(cp.Copy.Path), cp.Copy.Rev}
+			}
+			var infoGroup any = []any{}
+			if cp.Info != nil {
+				infoGroup = []any{[]byte(cp.Info.NodeKind), cp.Info.TextMods, cp.Info.PropMods}
+			}
+			changed = append(changed, []any{
+				[]byte(cp.Path),
+				cp.Mode,
+				copyGroup,
+				infoGroup,
+			})
+		}
+		if err := conn.Write([]any{
+			changed,
+			l.Rev,
+			[]any{[]byte(l.Author)},
+			[]any{[]byte(l.Date)},
+			[]any{[]byte(l.Message)},
+		}); err != nil {
+			return err
+		}
+	}
+	if err := conn.Write("done"); err != nil {
+		return err
+	}
+	return conn.WriteSuccess([]any{})
+}
+
+// handleUpdate answers an "update" command.
+func (s *Server) handleUpdate(conn conn, params Item) error {
+	if s.Update == nil {
+		return replyUnimplemented(conn, "update")
+	}
+	var args struct {
+		Rev     *uint
+		Target  string
+		Recurse bool
+	}
+	if err := Unmarshal(params, &args); err != nil {
+		return conn.WriteFailure(errMalformedNetworkData)
+	}
+	s.Update(args.Rev, args.Target, args.Recurse)
+	// empty auth-request:
+	return conn.WriteSuccess([]any{[]any{}, []byte{}})
+}
+
+// handleDiff answers a "diff" command.
+// params: ( [ rev:number ] target:string recurse:bool
+//
+//	ignore-ancestry:bool url:string ? text-deltas:bool
+//	? depth:word )
+func (s *Server) handleDiff(conn conn, params Item) error {
+	if s.Diff == nil {
+		return replyUnimplemented(conn, "diff")
+	}
+	var args struct {
+		Rev            *uint
+		Target         string
+		Recurse        bool
+		IgnoreAncestry bool
+		VersusURL      string
+		TextDeltas     bool
+		Depth          string
+	}
+	if err := Unmarshal(params, &args); err != nil {
+		return conn.WriteFailure(errMalformedNetworkData)
+	}
+	s.Diff(args.Rev, args.Target, args.Recurse, args.IgnoreAncestry, args.VersusURL, args.TextDeltas, args.Depth)
+	// empty auth-request: acked immediately, exactly like "update" --
+	// confirmed by raw wire capture, reading right after sending "diff"
+	// and before sending "set-path" (a first attempt assumed this ack
+	// was deferred until "finish-report", from a capture that sent
+	// set-path and finish-report before reading anything at all, which
+	// couldn't actually tell the two apart; a real client left waiting
+	// for this ack immediately, since it never comes with that
+	// assumption, is what caught the mistake).
+	return conn.WriteSuccess([]any{[]any{}, []byte{}})
+}
+
+// handleSwitch answers a "switch" command.
+// params: ( [ rev:number ] target:string recurse:bool
+//
+//	url:string ? depth:word send-copyfrom-args:bool
+//	ignore-ancestry:bool )
+//
+// Confirmed by raw wire capture against a real "svn switch":
+// depth/send-copyfrom-args/ignore-ancestry come right after url, not
+// interleaved with recurse/ignore-ancestry the way "diff"'s own params
+// are ordered.
+func (s *Server) handleSwitch(conn conn, params Item) error {
+	if s.Switch == nil {
+		return replyUnimplemented(conn, "switch")
+	}
+	var args struct {
+		Rev              *uint
+		Target           string
+		Recurse          bool
+		URL              string
+		Depth            string
+		SendCopyfromArgs bool
+		IgnoreAncestry   bool
+	}
+	if err := Unmarshal(params, &args); err != nil {
+		return conn.WriteFailure(errMalformedNetworkData)
+	}
+	s.Switch(args.Rev, args.Target, args.Recurse, args.URL, args.Depth, args.SendCopyfromArgs, args.IgnoreAncestry)
+	// empty auth-request: acked immediately, same as "update"/"diff".
+	return conn.WriteSuccess([]any{[]any{}, []byte{}})
+}
+
+// handleReparent answers a "reparent" command.
+// params: ( url:string )
+// response: ( )
+//
+// Unlike "update"/"diff"/"switch", this gets a real second response
+// beyond the empty auth-request pre-ack (confirmed by raw wire capture):
+// a real client waits for both before sending its next command.
+func (s *Server) handleReparent(conn conn, params Item) error {
+	if s.Reparent == nil {
+		return replyUnimplemented(conn, "reparent")
+	}
+	var args struct {
+		URL string
+	}
+	if err := Unmarshal(params, &args); err != nil {
+		return conn.WriteFailure(errMalformedNetworkData)
+	}
+	if err := s.Reparent(args.URL); err != nil {
+		return conn.WriteFailure(err)
+	}
+	if err := conn.WriteSuccess([]any{[]any{}, []byte{}}); err != nil {
+		return err
+	}
+	return conn.WriteSuccess([]any{})
+}
+
+// handleSetPath answers a "set-path" command, from the Report Command
+// Set: accumulates the reported path into *report regardless of whether
+// Server.SetPath is set (see its own doc comment); there is no response.
+func (s *Server) handleSetPath(conn conn, params Item, report *[]ReportedPath) error {
+	var args struct {
+		Path       string
+		Rev        uint
+		StartEmpty bool
+	}
+	if err := Unmarshal(params, &args); err != nil {
+		return conn.WriteFailure(errMalformedNetworkData)
+	}
+	*report = append(*report, ReportedPath{
+		Path: args.Path, Rev: args.Rev, StartEmpty: args.StartEmpty,
+	})
+	if s.SetPath != nil {
+		s.SetPath(args.Path, args.Rev, args.StartEmpty)
+	}
+	return nil
+}
+
+// handleFinishReport answers a "finish-report" command, from the Report
+// Command Set, ending the exchange *report accumulated: on success,
+// drives the returned []Item back to the client followed by close-edit;
+// on error, sends abort-edit instead, reading the client's own ack
+// either way before answering "finish-report" itself (a real client acks
+// abort-edit the same way it acks close-edit -- reported as a real bug
+// found by TestServerFinishReportErrorReadsAbortEditAck: leaving that
+// ack unread desyncs the connection, so the next thing the client sends
+// gets misread as a bogus command). *report is reset to nil once
+// handled, whether or not Server.FinishReport is even set.
+func (s *Server) handleFinishReport(conn conn, report *[]ReportedPath) error {
+	if s.FinishReport == nil {
+		*report = nil
+		return replyUnimplemented(conn, "finish-report")
+	}
+	// no response?
+	if err := conn.WriteSuccess([]any{[]any{}, []byte{}}); err != nil {
+		return err
+	}
+	items, err := s.FinishReport(*report)
+	*report = nil
+	if err != nil {
+		if err := conn.Write([]any{"abort-edit", []any{}}); err != nil {
+			return err
+		}
+		var ack Item
+		if err := conn.ReadResponse(&ack); err != nil {
+			return err
+		}
+		return conn.WriteSuccess([]any{})
+	}
+	for _, i := range items {
+		if err := conn.Write(i); err != nil {
+			return err
+		}
+	}
+	if err := conn.Write([]any{"close-edit", []any{}}); err != nil {
+		return err
+	}
+	var ack Item
+	if err := conn.ReadResponse(&ack); err != nil {
+		return err
+	}
+	return conn.WriteSuccess([]any{})
 }
 
 func replyUnimplemented(conn conn, cmd string) error {
