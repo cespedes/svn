@@ -168,7 +168,10 @@ server.Stat = func(path string, rev *uint) (svn.Dirent, error) {
 err := server.Serve(os.Stdin, os.Stdout)
 ```
 
-See [`examples/server`](examples/server) for a runnable version of this.
+See [`examples/server`](examples/server) for a runnable version of this, and
+[`examples/commit`](examples/commit) for one that receives a commit (via
+`Server.Commit`/`Server.FinishCommit`) from this package's own `Client`,
+both sides in one process.
 Setting `server.Debug = os.Stderr` (or any other `io.Writer`) logs every
 message `Serve` sends and receives, the same way `Client.SetDebug` does
 -- including the initial greeting, since `Serve` writes it itself rather
@@ -190,6 +193,9 @@ fsys := svnfs.New(c, nil) // nil rev: always the latest revision
 
 http.Handle("/", http.FileServerFS(fsys))
 ```
+
+See [`examples/svnfs`](examples/svnfs) for a runnable version that walks a
+whole repository with `fs.WalkDir`.
 
 A single `svn.Client` (and any `FS` built on it) is safe to share across
 goroutines: it locks around each command internally. That buys safety, not
